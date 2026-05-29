@@ -43,6 +43,10 @@ impl From<Mode> for SceneMode {
     }
 }
 
+/// Longest side of a freshly-dropped image sprite, in pixels.
+/// Images larger than this are scaled down uniformly; smaller ones are kept at 1:1.
+const MAX_DROP_DIM: f32 = 400.0;
+
 // ---------------------------------------------------------------------------
 // Default scene
 // ---------------------------------------------------------------------------
@@ -168,6 +172,8 @@ struct App {
     /// serialized to disk when the window is closed.
     store: SceneStore,
     scene: Option<Scene<Sprite>>,
+    /// Last known cursor position in physical pixels, used to place dropped images.
+    cursor_pos: (f32, f32),
 }
 
 impl App {
@@ -176,7 +182,59 @@ impl App {
             mode,
             store,
             scene: None,
+            cursor_pos: (0.0, 0.0),
         }
+    }
+
+    /// Handle a file dropped onto the window.
+    ///
+    /// Only acts in [`SceneMode::Edit`]; silently ignores the drop otherwise.
+    /// Files that cannot be decoded as images are reported to stderr and skipped.
+    fn handle_dropped_file(&mut self, path: &std::path::Path) {
+        let in_edit = self
+            .scene
+            .as_ref()
+            .is_some_and(|s| s.mode() == SceneMode::Edit);
+        if !in_edit {
+            return;
+        }
+
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("error: could not read dropped file {}: {e}", path.display());
+                return;
+            }
+        };
+
+        // Create the GPU texture; the immutable borrow of `scene` ends at `}`.
+        let texture = {
+            let engine = self.scene.as_ref().unwrap().engine();
+            match engine.create_texture_from_image_bytes(&bytes) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("error: {} is not a valid image: {e}", path.display());
+                    return;
+                }
+            }
+        };
+
+        // Scale down so the longest side is at most MAX_DROP_DIM; keep 1:1 for smaller images.
+        let img_w = texture.width as f32;
+        let img_h = texture.height as f32;
+        let scale = (MAX_DROP_DIM / img_w).min(MAX_DROP_DIM / img_h).min(1.0);
+        let w = img_w * scale;
+        let h = img_h * scale;
+
+        // Centre the new sprite on the cursor position at the time of the drop.
+        let x = (self.cursor_pos.0 - w / 2.0).max(0.0);
+        let y = (self.cursor_pos.1 - h / 2.0).max(0.0);
+
+        let sprite = Sprite::new(x, y, w, h, texture);
+        let record = DrawableRecord::new(x, y, w, h, TextureDef::Image(bytes));
+
+        self.scene.as_mut().unwrap().push_drawable(sprite);
+        self.store.drawables.push(record);
     }
 }
 
@@ -213,6 +271,9 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
+            WindowEvent::DroppedFile(ref path) => {
+                self.handle_dropped_file(path);
+            }
             WindowEvent::CloseRequested => {
                 // Flush current sprite positions back into the store, then save.
                 if let Some(scene) = &self.scene {
@@ -229,6 +290,10 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {
+                // Track cursor position so dropped files are placed under the pointer.
+                if let WindowEvent::CursorMoved { position, .. } = &event {
+                    self.cursor_pos = (position.x as f32, position.y as f32);
+                }
                 if let Some(scene) = &mut self.scene {
                     scene.handle_window_event(&event);
                 }
