@@ -66,7 +66,7 @@ impl DrawableRecord {
             width,
             height,
             texture_def,
-            locked: false,
+            locked: true,
         }
     }
 }
