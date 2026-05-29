@@ -1,0 +1,10 @@
+[package]
+name = "haboard"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wgpu = "29"
+winit = "0.30"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+bytemuck = { version = "1", features = ["derive"] }
