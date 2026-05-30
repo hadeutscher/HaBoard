@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use winit::{
@@ -42,6 +43,21 @@ enum InputMode {
 }
 
 // ---------------------------------------------------------------------------
+// Per-finger drag state
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct TouchDrag {
+    /// Screen position where this finger first landed.
+    start_touch: (f32, f32),
+    /// Start positions of every drawable being moved by this touch.
+    /// Holds one entry for a solo drag, or the full selection group when the
+    /// touched drawable was already selected.
+    /// `(entry_index, start_x, start_y)`
+    start_positions: Vec<(usize, f32, f32)>,
+}
+
+// ---------------------------------------------------------------------------
 // Scene
 // ---------------------------------------------------------------------------
 
@@ -62,7 +78,10 @@ pub struct Scene<T: Drawable> {
     scene_mode: SceneMode,
     cursor_pos: (f32, f32),
     input_mode: InputMode,
-    primary_touch: Option<u64>,
+    /// Per-finger drag state. Each touch point independently drags one drawable.
+    touch_drags: HashMap<u64, TouchDrag>,
+    /// Touch ID currently driving rubber-band selection, if any.
+    rubber_band_touch: Option<u64>,
 
     // Overlay texture: semi-transparent blue for the rubber-band rectangle.
     sel_box_tex: Arc<Texture>,
@@ -86,7 +105,8 @@ impl<T: Drawable> Scene<T> {
             scene_mode: mode,
             cursor_pos: (0.0, 0.0),
             input_mode: InputMode::default(),
-            primary_touch: None,
+            touch_drags: HashMap::new(),
+            rubber_band_touch: None,
             sel_box_tex,
             nudge_px: 10.0,
         }
@@ -103,6 +123,8 @@ impl<T: Drawable> Scene<T> {
                 e.selected = false;
             }
             self.input_mode = InputMode::Idle;
+            self.touch_drags.clear();
+            self.rubber_band_touch = None;
         }
         self.scene_mode = mode;
     }
@@ -146,28 +168,79 @@ impl<T: Drawable> Scene<T> {
                 let (tx, ty) = (touch.location.x as f32, touch.location.y as f32);
                 match touch.phase {
                     TouchPhase::Started => {
-                        if self.primary_touch.is_none() {
-                            self.primary_touch = Some(touch.id);
-                            self.on_cursor_move(tx, ty);
-                            self.on_press();
+                        match self.find_hit_for_touch(tx, ty) {
+                            Some(idx) => {
+                                // Skip if another finger is already dragging this drawable.
+                                let already_claimed = self
+                                    .touch_drags
+                                    .values()
+                                    .any(|d| d.start_positions.iter().any(|&(i, _, _)| i == idx));
+                                if !already_claimed {
+                                    let start_positions = if self.scene_mode == SceneMode::Edit
+                                        && self.drawables.entries[idx].selected
+                                    {
+                                        // Drag the whole selection group.
+                                        self.drawables
+                                            .entries
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_, e)| e.selected)
+                                            .map(|(i, e)| (i, e.drawable.x(), e.drawable.y()))
+                                            .collect()
+                                    } else {
+                                        // Solo drag — bring to front in Edit mode.
+                                        if self.scene_mode == SceneMode::Edit {
+                                            let new_z = self.drawables.max_z() + 1.0;
+                                            self.drawables.entries[idx].drawable.set_z(new_z);
+                                        }
+                                        vec![(
+                                            idx,
+                                            self.drawables.entries[idx].drawable.x(),
+                                            self.drawables.entries[idx].drawable.y(),
+                                        )]
+                                    };
+                                    self.touch_drags.insert(
+                                        touch.id,
+                                        TouchDrag {
+                                            start_touch: (tx, ty),
+                                            start_positions,
+                                        },
+                                    );
+                                }
+                            }
+                            None if self.scene_mode == SceneMode::Edit
+                                && self.rubber_band_touch.is_none() =>
+                            {
+                                // Empty space in Edit mode — start rubber-band selection.
+                                self.rubber_band_touch = Some(touch.id);
+                                self.cursor_pos = (tx, ty);
+                                self.on_press();
+                            }
+                            None => {}
                         }
                     }
                     TouchPhase::Moved => {
-                        if self.primary_touch == Some(touch.id) {
+                        // Clone positions out before mutably borrowing drawables.
+                        let updates = self
+                            .touch_drags
+                            .get(&touch.id)
+                            .map(|d| (d.start_touch, d.start_positions.clone()));
+                        if let Some(((stx, sty), positions)) = updates {
+                            let (dx, dy) = (tx - stx, ty - sty);
+                            for (idx, sx, sy) in positions {
+                                self.drawables.entries[idx]
+                                    .drawable
+                                    .set_position(sx + dx, sy + dy);
+                            }
+                        } else if self.rubber_band_touch == Some(touch.id) {
                             self.on_cursor_move(tx, ty);
                         }
                     }
-                    TouchPhase::Ended => {
-                        if self.primary_touch == Some(touch.id) {
-                            self.on_cursor_move(tx, ty);
+                    TouchPhase::Ended | TouchPhase::Cancelled => {
+                        self.touch_drags.remove(&touch.id);
+                        if self.rubber_band_touch == Some(touch.id) {
                             self.on_release();
-                            self.primary_touch = None;
-                        }
-                    }
-                    TouchPhase::Cancelled => {
-                        if self.primary_touch == Some(touch.id) {
-                            self.input_mode = InputMode::Idle;
-                            self.primary_touch = None;
+                            self.rubber_band_touch = None;
                         }
                     }
                 }
@@ -353,6 +426,31 @@ impl<T: Drawable> Scene<T> {
         self.input_mode = InputMode::Idle;
     }
 
+    /// Find the topmost drawable under a touch point, respecting mode drag rules.
+    ///
+    /// In [`SceneMode::Edit`] all drawables are candidates; in
+    /// [`SceneMode::Run`] only unlocked ones are.
+    fn find_hit_for_touch(&self, tx: f32, ty: f32) -> Option<usize> {
+        self.drawables
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                e.hit_test_point(tx, ty)
+                    && match self.scene_mode {
+                        SceneMode::Edit => true,
+                        SceneMode::Run => !e.drawable.locked(),
+                    }
+            })
+            .max_by(|(_, a), (_, b)| {
+                a.drawable
+                    .z()
+                    .partial_cmp(&b.drawable.z())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+    }
+
     // ── Keyboard shortcuts (Edit mode only) ──────────────────────────────────────────
 
     fn on_key(&mut self, event: &KeyEvent) -> bool {
@@ -375,6 +473,7 @@ impl<T: Drawable> Scene<T> {
             Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) if !event.repeat => {
                 self.drawables.entries.retain(|e| !e.selected);
                 self.input_mode = InputMode::Idle;
+                self.touch_drags.clear(); // entry indices may have shifted after retain
                 true
             }
             // Arrow keys — nudge selected drawables (repeats while held).
