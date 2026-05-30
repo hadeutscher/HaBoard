@@ -17,6 +17,9 @@ use winit::{
 
 use crate::{Engine, ImageData, Scene, SceneMode, Sprite};
 
+/// Callback type for [`SceneRunner::on_event`].
+type EventHandler = dyn FnMut(&WindowEvent, &ModifiersState, Option<&mut Scene<Sprite>>);
+
 /// A ready-made [`winit`] application that owns a [`Scene<Sprite>`] and
 /// handles the full application lifecycle.
 ///
@@ -47,8 +50,7 @@ pub struct SceneRunner {
     /// Maximum display size (longest side, in pixels) for drag-dropped images.
     /// Images larger than this are scaled down proportionally. Default: `400.0`.
     pub max_drop_dim: f32,
-    event_handler:
-        Option<Box<dyn FnMut(&WindowEvent, &ModifiersState, Option<&mut Scene<Sprite>>)>>,
+    event_handler: Option<Box<EventHandler>>,
 }
 
 impl SceneRunner {
