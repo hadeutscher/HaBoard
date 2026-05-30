@@ -1,52 +1,58 @@
-use std::sync::Arc;
-
-use crate::texture::Texture;
+use crate::image_data::ImageData;
 
 /// A 2D object that can be drawn to the screen.
 ///
-/// Implement this trait to create custom drawable objects that can be rendered
-/// by the [`Engine`] and managed inside a [`Scene`].
+/// Implement this trait to integrate custom objects with [`Scene`] and
+/// [`Drawables`].
 ///
-/// Selection state is **not** part of this trait — it is managed by [`Scene`]
-/// so that implementors only need to describe how an object looks and where it
-/// sits, not how the UI tracks interaction with it.
+/// # Image upload
+/// [`image`](Drawable::image) is called **exactly once**, when the drawable is
+/// first added via [`Drawables::push`]. The engine uploads the image to the GPU
+/// at that point and retains the resulting texture for the lifetime of the
+/// entry. Do not rely on subsequent calls being made.
 ///
-/// [`Engine`]: crate::Engine
+/// # Selection state
+/// Selection is **not** part of this trait — it is managed internally by
+/// [`Drawables`] so that implementations only need to describe geometry.
+///
+/// [`Drawables`]: crate::Drawables
 /// [`Scene`]: crate::Scene
 pub trait Drawable {
-    /// X position in pixels from the left edge of the window.
     fn x(&self) -> f32;
-
-    /// Y position in pixels from the top edge of the window.
     fn y(&self) -> f32;
-
-    /// Width of the object in pixels.
     fn width(&self) -> f32;
-
-    /// Height of the object in pixels.
     fn height(&self) -> f32;
 
-    /// The texture used to draw this object.
-    fn texture(&self) -> &Arc<Texture>;
+    /// Z-order value. Higher values render on top. Default: `0.0`.
+    fn z(&self) -> f32 {
+        0.0
+    }
+
+    /// Update the Z-order value.
+    ///
+    /// Default implementation is a no-op. Implement this to allow the scene to
+    /// bring drawables to the front on click.
+    fn set_z(&mut self, z: f32) {
+        let _ = z;
+    }
+
+    /// Image used to texture this drawable.
+    ///
+    /// Called **once** when the drawable is added to [`Drawables`]. See the
+    /// trait-level documentation for details.
+    fn image(&self) -> ImageData;
 
     /// Move the object to a new screen position.
     fn set_position(&mut self, x: f32, y: f32);
 
-    /// Whether this drawable is pinned in place.
-    ///
-    /// In [`SceneMode::Run`](crate::SceneMode::Run), locked drawables cannot
-    /// be dragged.  In [`SceneMode::Edit`](crate::SceneMode::Edit) this flag
-    /// is ignored and every drawable is freely movable.
-    ///
-    /// Returns `false` by default (unlocked).
+    /// Whether this drawable is pinned in [`SceneMode::Run`](crate::SceneMode::Run).
+    /// Default: `false`.
     fn locked(&self) -> bool {
         false
     }
 
     /// Returns `true` if the screen point `(px, py)` hits this object.
-    ///
-    /// The default implementation performs a simple bounding-box check.
-    /// Override it to add alpha-aware or shape-based hit testing.
+    /// Default: axis-aligned bounding-box check.
     fn hit_test_point(&self, px: f32, py: f32) -> bool {
         px >= self.x()
             && px < self.x() + self.width()
@@ -54,10 +60,8 @@ pub trait Drawable {
             && py < self.y() + self.height()
     }
 
-    /// Returns `true` if the axis-aligned rectangle `(rx, ry, rw, rh)` in
-    /// screen space overlaps this object.
-    ///
-    /// The default implementation tests bounding-box intersection.
+    /// Returns `true` if the axis-aligned rectangle `(rx, ry, rw, rh)` overlaps
+    /// this object. Default: bounding-box intersection.
     fn hit_test_rect(&self, rx: f32, ry: f32, rw: f32, rh: f32) -> bool {
         !(rx >= self.x() + self.width()
             || rx + rw <= self.x()
@@ -66,10 +70,8 @@ pub trait Drawable {
     }
 }
 
-/// Blanket impl so that `Box<dyn Drawable>` (and `Box<Sprite>`, etc.) can
-/// itself be used as a `Drawable`.  This lets callers choose
-/// `Scene<Box<dyn Drawable>>` for heterogeneous collections while the default
-/// `Scene<Sprite>` path stays allocation-free.
+/// Blanket impl so `Box<dyn Drawable>` can itself be used as a `Drawable`,
+/// enabling heterogeneous `Scene<Box<dyn Drawable>>` collections.
 impl<D: Drawable + ?Sized> Drawable for Box<D> {
     fn x(&self) -> f32 {
         (**self).x()
@@ -83,8 +85,14 @@ impl<D: Drawable + ?Sized> Drawable for Box<D> {
     fn height(&self) -> f32 {
         (**self).height()
     }
-    fn texture(&self) -> &Arc<Texture> {
-        (**self).texture()
+    fn z(&self) -> f32 {
+        (**self).z()
+    }
+    fn set_z(&mut self, z: f32) {
+        (**self).set_z(z)
+    }
+    fn image(&self) -> ImageData {
+        (**self).image()
     }
     fn set_position(&mut self, x: f32, y: f32) {
         (**self).set_position(x, y)

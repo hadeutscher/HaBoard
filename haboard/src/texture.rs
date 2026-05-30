@@ -1,21 +1,18 @@
-use std::path::Path;
-
 /// A GPU-resident texture with its associated sampler, ready to be bound in a draw call.
-#[allow(dead_code)]
-pub struct Texture {
+pub(crate) struct Texture {
     /// The bind group that exposes this texture and its sampler to the shader.
     pub(crate) bind_group: wgpu::BindGroup,
     /// Original image width in pixels.
-    pub width: u32,
+    pub(crate) width: u32,
     /// Original image height in pixels.
-    pub height: u32,
-    /// CPU-side copy of the RGBA pixel data, used for alpha hit-testing.
+    pub(crate) height: u32,
+    /// CPU-side copy of the decoded RGBA pixel data, used for alpha hit-testing.
     pub(crate) rgba: Vec<u8>,
 }
 
 impl Texture {
     /// Upload raw RGBA bytes to a new GPU texture and create a bind group for it.
-    pub fn from_rgba_bytes(
+    pub(crate) fn from_rgba_bytes(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         layout: &wgpu::BindGroupLayout,
@@ -92,8 +89,7 @@ impl Texture {
     }
 
     /// Decode and upload an in-memory image file (PNG, JPEG, …).
-    #[allow(dead_code)]
-    pub fn from_image_bytes(
+    pub(crate) fn from_image_bytes(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         layout: &wgpu::BindGroupLayout,
@@ -107,23 +103,7 @@ impl Texture {
         ))
     }
 
-    /// Load an image from disk and upload it to the GPU.
-    #[allow(dead_code)]
-    pub fn from_path(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        layout: &wgpu::BindGroupLayout,
-        path: impl AsRef<Path>,
-    ) -> Result<Self, image::ImageError> {
-        let img = image::open(path)?.into_rgba8();
-        let (width, height) = img.dimensions();
-        Ok(Self::from_rgba_bytes(
-            device, queue, layout, &img, width, height, None,
-        ))
-    }
-
-    /// Returns the alpha byte of the texel at pixel coordinates `(x, y)`.
-    /// Returns 0 for out-of-bounds coordinates.
+    /// Returns the alpha byte of the texel at `(x, y)`. Returns `0` if out of bounds.
     pub(crate) fn alpha_at(&self, x: u32, y: u32) -> u8 {
         if x >= self.width || y >= self.height {
             return 0;
@@ -131,8 +111,7 @@ impl Texture {
         self.rgba[((y * self.width + x) * 4 + 3) as usize]
     }
 
-    /// Returns `true` if any texel inside the rectangle `(rx, ry, rw, rh)` in
-    /// texel space has alpha >= `threshold`.
+    /// Returns `true` if any texel inside `(rx, ry, rw, rh)` has alpha >= `threshold`.
     pub(crate) fn has_opaque_in_region(
         &self,
         rx: u32,

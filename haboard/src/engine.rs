@@ -3,22 +3,15 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::drawable::Drawable;
+use crate::drawables::TextureUploader;
 use crate::texture::Texture;
 
-/// Maximum number of drawables that can be drawn in a single `render_drawables` call.
-const MAX_DRAWABLES: usize = 10_000;
+/// Maximum number of quads that can be drawn in a single `draw_quads` call.
+const MAX_QUADS: usize = 10_000;
 
 // ---------------------------------------------------------------------------
 // WGSL shader
 // ---------------------------------------------------------------------------
-//
-// Bind group 0: screen-size uniform (vertex stage)
-// Bind group 1: texture + sampler   (fragment stage)
-//
-// Vertices carry pixel-space positions; the vertex shader converts them to
-// normalised device coordinates (NDC) using the screen size uniform so that
-// (0, 0) maps to the top-left corner of the window.
 
 const SHADER_SRC: &str = r#"
 struct ScreenUniform {
@@ -41,9 +34,6 @@ struct VertOut {
 @vertex
 fn vs_main(in: VertIn) -> VertOut {
     var out: VertOut;
-    // Convert pixel coordinates to [-1, 1] NDC.
-    // x: 0 → -1,  width → +1
-    // y: 0 → +1,  height → -1  (window top = NDC top)
     out.clip_pos = vec4<f32>(
         (in.position.x / screen.size.x) * 2.0 - 1.0,
         1.0 - (in.position.y / screen.size.y) * 2.0,
@@ -88,38 +78,41 @@ impl Vertex {
 }
 
 // ---------------------------------------------------------------------------
+// Quad — the unit of rendering
+// ---------------------------------------------------------------------------
+
+/// A single textured quad submitted to [`Engine::draw_quads`].
+pub(crate) struct Quad<'a> {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub texture: &'a Texture,
+}
+
+// ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
 
-/// The low-level rendering engine.
+/// The low-level GPU rendering engine.
 ///
-/// `Engine` manages all wgpu resources for a window.  It is a pure renderer:
-/// it draws whatever [`Drawable`] objects it is given each frame and holds no
-/// scene state itself.  Use [`Scene`](crate::Scene) to pair the engine with a
-/// managed drawable collection.
+/// `Engine` manages all wgpu resources for a window. It is a pure renderer:
+/// given a list of [`Quad`]s it rasterises them each frame and holds no scene
+/// state. Use [`Scene`](crate::Scene) to pair the engine with a managed
+/// drawable collection.
 pub struct Engine {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-
     render_pipeline: wgpu::RenderPipeline,
-
-    /// Pre-allocated vertex buffer (capacity: MAX_DRAWABLES * 4 vertices).
     vertex_buffer: wgpu::Buffer,
-    /// Static index buffer: [0,1,2, 0,2,3].  Re-used for every quad via
-    /// `draw_indexed`'s `base_vertex` parameter.
     index_buffer: wgpu::Buffer,
-
-    /// Uniform buffer holding the current window size as `vec2<f32>`.
     screen_uniform: wgpu::Buffer,
     screen_bind_group: wgpu::BindGroup,
-
-    /// Shared layout for every texture bind group created by this engine.
     texture_bind_group_layout: wgpu::BindGroupLayout,
-
-    /// Background clear colour (default: dark grey).
+    /// Background clear colour. Default: dark grey.
     pub clear_color: wgpu::Color,
 }
 
@@ -128,16 +121,12 @@ impl Engine {
     pub async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
 
-        // ── Instance & surface ──────────────────────────────────────────────
         let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
         instance_desc.backends = wgpu::Backends::all();
         let instance = wgpu::Instance::new(instance_desc);
 
-        // SAFETY: the window is kept alive inside `Self`, so the surface is
-        // valid for the lifetime of the engine.
-        let surface = instance.create_surface(window.clone()).unwrap();
+        let surface = instance.create_surface(Arc::clone(&window)).unwrap();
 
-        // ── Adapter ─────────────────────────────────────────────────────────
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
@@ -145,9 +134,8 @@ impl Engine {
                 force_fallback_adapter: false,
             })
             .await
-            .expect("No suitable GPU adapter found");
+            .unwrap();
 
-        // ── Device & queue ───────────────────────────────────────────────────
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Engine device"),
@@ -156,48 +144,66 @@ impl Engine {
                 ..Default::default()
             })
             .await
-            .expect("Failed to create device");
+            .unwrap();
 
-        // ── Surface configuration ────────────────────────────────────────────
-        let mut config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-            .expect("Surface is not supported by the adapter");
-        // Prefer FIFO (vsync) for the demo.
-        config.present_mode = wgpu::PresentMode::Fifo;
+        let surface_caps = surface.get_capabilities(&adapter);
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
         surface.configure(&device, &config);
 
-        // ── Screen-size uniform ──────────────────────────────────────────────
-        let screen_data: [f32; 2] = [size.width as f32, size.height as f32];
+        // ── Shader ───────────────────────────────────────────────────────────
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Sprite shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
+        });
+
+        // ── Screen uniform ───────────────────────────────────────────────────
         let screen_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Screen uniform"),
-            contents: bytemuck::cast_slice(&screen_data),
+            contents: bytemuck::cast_slice(&[size.width as f32, size.height as f32]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let screen_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Screen BGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        let screen_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Screen BGL"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
 
         let screen_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Screen BG"),
-            layout: &screen_bgl,
+            layout: &screen_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: screen_uniform.as_entire_binding(),
             }],
         });
 
-        // ── Texture bind group layout (shared by all textures) ───────────────
+        // ── Texture bind group layout ─────────────────────────────────────────
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Texture BGL"),
@@ -221,15 +227,13 @@ impl Engine {
                 ],
             });
 
-        // ── Render pipeline ──────────────────────────────────────────────────
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Sprite shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
-        });
-
+        // ── Render pipeline ───────────────────────────────────────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Pipeline layout"),
-            bind_group_layouts: &[Some(&screen_bgl), Some(&texture_bind_group_layout)],
+            bind_group_layouts: &[
+                Some(&screen_bind_group_layout),
+                Some(&texture_bind_group_layout),
+            ],
             immediate_size: 0,
         });
 
@@ -247,7 +251,6 @@ impl Engine {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
-                    // Alpha blending so transparent images composite correctly.
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -255,9 +258,12 @@ impl Engine {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // no back-face culling for 2-D sprites
-                ..Default::default()
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
@@ -265,20 +271,24 @@ impl Engine {
             cache: None,
         });
 
-        // ── Vertex buffer (dynamic, rewritten every frame) ───────────────────
+        // ── Vertex buffer (pre-allocated) ─────────────────────────────────────
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vertex buffer"),
-            size: (MAX_DRAWABLES * 4 * std::mem::size_of::<Vertex>()) as u64,
+            size: (MAX_QUADS * 4 * std::mem::size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        // ── Index buffer (static: one quad = 6 indices) ──────────────────────
-        // draw_indexed() offsets these indices via base_vertex so a single
-        // six-entry buffer serves every drawable in the batch.
+        // ── Index buffer (static: [0,1,2, 0,2,3] repeated) ───────────────────
+        let indices: Vec<u32> = (0..MAX_QUADS as u32)
+            .flat_map(|i| {
+                let b = i * 4;
+                [b, b + 1, b + 2, b, b + 2, b + 3]
+            })
+            .collect();
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Index buffer"),
-            contents: bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3]),
+            contents: bytemuck::cast_slice(&indices),
             usage: wgpu::BufferUsages::INDEX,
         });
 
@@ -295,85 +305,50 @@ impl Engine {
             screen_bind_group,
             texture_bind_group_layout,
             clear_color: wgpu::Color {
-                r: 0.08,
-                g: 0.08,
-                b: 0.08,
+                r: 0.1,
+                g: 0.1,
+                b: 0.1,
                 a: 1.0,
             },
         }
     }
 
-    // ── Public helpers ───────────────────────────────────────────────────────
-
-    pub fn window(&self) -> &Window {
+    /// Return a reference to the window.
+    pub fn window(&self) -> &Arc<Window> {
         &self.window
     }
 
-    /// Call this whenever the window is resized.
-    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width == 0 || new_size.height == 0 {
+    /// Handle a window resize.
+    pub fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
+        if size.width == 0 || size.height == 0 {
             return;
         }
-        self.config.width = new_size.width;
-        self.config.height = new_size.height;
+        self.config.width = size.width;
+        self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
-
-        let data: [f32; 2] = [new_size.width as f32, new_size.height as f32];
-        self.queue
-            .write_buffer(&self.screen_uniform, 0, bytemuck::cast_slice(&data));
+        self.queue.write_buffer(
+            &self.screen_uniform,
+            0,
+            bytemuck::cast_slice(&[size.width as f32, size.height as f32]),
+        );
     }
 
-    // ── Texture loading ──────────────────────────────────────────────────────
-
-    /// Load a texture from an image file on disk (PNG, JPEG, …).
-    #[allow(dead_code)]
-    pub fn load_texture(&self, path: &str) -> Result<Arc<Texture>, image::ImageError> {
-        Texture::from_path(
-            &self.device,
-            &self.queue,
-            &self.texture_bind_group_layout,
-            path,
-        )
-        .map(Arc::new)
+    /// Build a [`TextureUploader`] that shares this engine's device, queue, and
+    /// texture bind-group layout.  Used by [`Drawables`](crate::Drawables) to
+    /// upload images independently of the engine.
+    pub(crate) fn make_uploader(&self) -> TextureUploader {
+        TextureUploader {
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            layout: self.texture_bind_group_layout.clone(),
+        }
     }
 
-    /// Create a texture from raw RGBA pixel data.
-    pub fn create_texture_from_rgba(&self, rgba: &[u8], width: u32, height: u32) -> Arc<Texture> {
-        Arc::new(Texture::from_rgba_bytes(
-            &self.device,
-            &self.queue,
-            &self.texture_bind_group_layout,
-            rgba,
-            width,
-            height,
-            None,
-        ))
-    }
-
-    /// Decode and upload an in-memory image file (PNG, JPEG, …).
-    #[allow(dead_code)]
-    pub fn create_texture_from_image_bytes(
-        &self,
-        bytes: &[u8],
-    ) -> Result<Arc<Texture>, image::ImageError> {
-        Texture::from_image_bytes(
-            &self.device,
-            &self.queue,
-            &self.texture_bind_group_layout,
-            bytes,
-            None,
-        )
-        .map(Arc::new)
-    }
-
-    // ── Rendering ────────────────────────────────────────────────────────────
-
-    /// Draw a list of [`Drawable`] objects and present the frame.
+    /// Render a list of textured quads to the surface.
     ///
-    /// Objects are drawn back-to-front in the order they appear in the slice,
-    /// so the last element appears on top.
-    pub fn render_drawables<D: Drawable>(&mut self, drawables: &[D]) {
-        // Acquire the next surface texture to render into.
+    /// Pass 1 (user drawables, Z-sorted) and pass 2 (overlays) are both
+    /// submitted as a single flat `quads` slice by the caller ([`Scene`](crate::Scene)).
+    pub(crate) fn draw_quads(&mut self, quads: &[Quad<'_>]) {
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex)
             | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
@@ -387,40 +362,36 @@ impl Engine {
             }
         };
 
-        let count = drawables.len().min(MAX_DRAWABLES);
+        let count = quads.len().min(MAX_QUADS);
 
-        // Build and upload all quad vertices before opening the render pass.
         if count > 0 {
             let mut verts: Vec<Vertex> = Vec::with_capacity(count * 4);
-            for d in &drawables[..count] {
-                let (x0, y0) = (d.x(), d.y());
-                let (x1, y1) = (d.x() + d.width(), d.y() + d.height());
-                // CCW winding in NDC space (shader flips screen-Y to NDC-Y):
-                // TL → BL → BR → TR  with indices [0,1,2, 0,2,3]
+            for q in &quads[..count] {
+                let (x0, y0) = (q.x, q.y);
+                let (x1, y1) = (q.x + q.width, q.y + q.height);
                 verts.extend_from_slice(&[
                     Vertex {
                         position: [x0, y0],
                         uv: [0.0, 0.0],
-                    }, // 0 top-left
+                    },
                     Vertex {
                         position: [x0, y1],
                         uv: [0.0, 1.0],
-                    }, // 1 bottom-left
+                    },
                     Vertex {
                         position: [x1, y1],
                         uv: [1.0, 1.0],
-                    }, // 2 bottom-right
+                    },
                     Vertex {
                         position: [x1, y0],
                         uv: [1.0, 0.0],
-                    }, // 3 top-right
+                    },
                 ]);
             }
             self.queue
                 .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&verts));
         }
 
-        // Encode GPU commands.
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -453,11 +424,8 @@ impl Engine {
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
-            // One draw call per drawable.  The static index buffer [0,1,2,0,2,3]
-            // is reused for every quad; base_vertex shifts it to the right quad
-            // in the vertex buffer.
-            for (i, drawable) in drawables[..count].iter().enumerate() {
-                pass.set_bind_group(1, &drawable.texture().bind_group, &[]);
+            for (i, quad) in quads[..count].iter().enumerate() {
+                pass.set_bind_group(1, &quad.texture.bind_group, &[]);
                 pass.draw_indexed(0..6, (i * 4) as i32, 0..1);
             }
         }

@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-postcard = { version = "1", features = ["alloc"] }
-serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 haboard = { path = "../haboard" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+postcard = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["derive", "rc"] }
 winit = "0.30"
 pollster = "0.3"
