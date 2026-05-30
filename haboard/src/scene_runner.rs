@@ -162,13 +162,15 @@ impl ApplicationHandler for SceneRunner {
                 .create_window(
                     Window::default_attributes()
                         .with_title("HaBoard")
-                        .with_inner_size(winit::dpi::LogicalSize::new(800u32, 600u32)),
+                        .with_maximized(true),
                 )
                 .expect("Failed to create window"),
         );
         let engine = pollster::block_on(Engine::new(window));
         let sprites = self.initial_sprites.take().unwrap_or_default();
-        self.scene = Some(Scene::new(engine, sprites, self.scene_mode));
+        let mut scene = Scene::new(engine, sprites, self.scene_mode);
+        scene.render();
+        self.scene = Some(scene);
     }
 
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
