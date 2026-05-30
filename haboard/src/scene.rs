@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use winit::{
-    event::{ElementState, MouseButton, TouchPhase, WindowEvent},
+    event::{ElementState, KeyEvent, MouseButton, TouchPhase, WindowEvent},
+    keyboard::{Key, NamedKey},
     window::Window,
 };
 
@@ -62,6 +63,8 @@ pub struct Scene<T: Drawable> {
     sel_box_tex: Arc<Texture>,
     /// Thickness of the selection halo border in pixels. Default: `3.0`.
     pub sel_border: f32,
+    /// Distance in pixels moved per arrow-key press. Default: `10.0`.
+    pub nudge_px: f32,
 }
 
 impl<T: Drawable> Scene<T> {
@@ -85,6 +88,7 @@ impl<T: Drawable> Scene<T> {
             sel_border_tex,
             sel_box_tex,
             sel_border: 3.0,
+            nudge_px: 10.0,
         }
     }
 
@@ -169,6 +173,7 @@ impl<T: Drawable> Scene<T> {
                 }
                 true
             }
+            WindowEvent::KeyboardInput { event, .. } => self.on_key(event),
             _ => false,
         }
     }
@@ -370,5 +375,74 @@ impl<T: Drawable> Scene<T> {
 
     fn on_release(&mut self) {
         self.input_mode = InputMode::Idle;
+    }
+
+    // ── Keyboard shortcuts (Edit mode only) ──────────────────────────────────────────
+
+    fn on_key(&mut self, event: &KeyEvent) -> bool {
+        if event.state != ElementState::Pressed {
+            return false;
+        }
+        if self.scene_mode != SceneMode::Edit {
+            return false;
+        }
+        match &event.logical_key {
+            // Escape — deselect all and cancel any in-progress interaction.
+            Key::Named(NamedKey::Escape) => {
+                for e in &mut self.drawables.entries {
+                    e.selected = false;
+                }
+                self.input_mode = InputMode::Idle;
+                true
+            }
+            // Delete / Backspace — remove all selected drawables (no repeat).
+            Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) if !event.repeat => {
+                self.drawables.entries.retain(|e| !e.selected);
+                self.input_mode = InputMode::Idle;
+                true
+            }
+            // Arrow keys — nudge selected drawables (repeats while held).
+            Key::Named(NamedKey::ArrowLeft) => {
+                self.nudge_selected(-self.nudge_px, 0.0);
+                true
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                self.nudge_selected(self.nudge_px, 0.0);
+                true
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.nudge_selected(0.0, -self.nudge_px);
+                true
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.nudge_selected(0.0, self.nudge_px);
+                true
+            }
+            // +/= — raise Z of selected drawables (repeats while held).
+            Key::Character(c) if c == "+" || c == "=" => {
+                self.adjust_z_selected(1.0);
+                true
+            }
+            // - — lower Z of selected drawables (repeats while held).
+            Key::Character(c) if c == "-" => {
+                self.adjust_z_selected(-1.0);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn nudge_selected(&mut self, dx: f32, dy: f32) {
+        for e in self.drawables.entries.iter_mut().filter(|e| e.selected) {
+            let (x, y) = (e.drawable.x(), e.drawable.y());
+            e.drawable.set_position(x + dx, y + dy);
+        }
+    }
+
+    fn adjust_z_selected(&mut self, delta: f32) {
+        for e in self.drawables.entries.iter_mut().filter(|e| e.selected) {
+            let z = e.drawable.z();
+            e.drawable.set_z(z + delta);
+        }
     }
 }

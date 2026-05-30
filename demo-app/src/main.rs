@@ -4,8 +4,9 @@ use clap::{Parser, ValueEnum};
 use haboard::{Drawables, Engine, ImageData, Scene, SceneMode, Sprite, textures};
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -115,6 +116,8 @@ struct App {
     scene: Option<Scene<Sprite>>,
     /// Last known cursor position, used to place drag-dropped images.
     cursor_pos: (f32, f32),
+    /// Current keyboard modifier state, used for Ctrl+S.
+    modifiers: ModifiersState,
 }
 
 impl App {
@@ -124,6 +127,7 @@ impl App {
             initial_sprites: Some(sprites),
             scene: None,
             cursor_pos: (0.0, 0.0),
+            modifiers: ModifiersState::empty(),
         }
     }
 
@@ -221,6 +225,28 @@ impl ApplicationHandler for App {
                 // Track cursor position for drop placement.
                 if let WindowEvent::CursorMoved { position, .. } = &event {
                     self.cursor_pos = (position.x as f32, position.y as f32);
+                }
+                // Track modifier keys for Ctrl+S.
+                if let WindowEvent::ModifiersChanged(mods) = &event {
+                    self.modifiers = mods.state();
+                }
+                // Ctrl+S: save immediately without forwarding to the scene.
+                if let WindowEvent::KeyboardInput {
+                    event: key_event, ..
+                } = &event
+                {
+                    if key_event.state == ElementState::Pressed
+                        && !key_event.repeat
+                        && self.modifiers.control_key()
+                        && key_event.physical_key == PhysicalKey::Code(KeyCode::KeyS)
+                    {
+                        if let Some(scene) = &self.scene {
+                            if let Err(e) = save_scene(&scene.drawables) {
+                                eprintln!("error: failed to save scene: {e}");
+                            }
+                        }
+                        return;
+                    }
                 }
                 if let Some(scene) = &mut self.scene {
                     scene.handle_window_event(&event);
