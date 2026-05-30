@@ -45,6 +45,12 @@ enum InputMode {
 // Scene
 // ---------------------------------------------------------------------------
 
+/// Tint applied to selected sprites in Edit mode.
+/// RGBA interpreted as [tint_r, tint_g, tint_b, mix_factor].
+const SELECTION_TINT: [f32; 4] = [0.12, 0.55, 1.0, 0.35];
+/// No tint — used for unselected sprites and overlay quads.
+const NO_TINT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+
 /// Pairs an [`Engine`] with a [`Drawables`] collection and owns all interaction
 /// logic: dragging, click selection, rubber-band multi-selection, and touch.
 pub struct Scene<T: Drawable> {
@@ -58,11 +64,8 @@ pub struct Scene<T: Drawable> {
     input_mode: InputMode,
     primary_touch: Option<u64>,
 
-    // Overlay textures (1×1 solid colour, stretched at draw time).
-    sel_border_tex: Arc<Texture>,
+    // Overlay texture: semi-transparent blue for the rubber-band rectangle.
     sel_box_tex: Arc<Texture>,
-    /// Thickness of the selection halo border in pixels. Default: `3.0`.
-    pub sel_border: f32,
     /// Distance in pixels moved per arrow-key press. Default: `10.0`.
     pub nudge_px: f32,
 }
@@ -74,7 +77,6 @@ impl<T: Drawable> Scene<T> {
     /// of the engine.
     pub fn new(engine: Engine, initial: Vec<T>, mode: SceneMode) -> Self {
         let uploader = engine.make_uploader();
-        let sel_border_tex = uploader.upload_rgba_bytes(&[30, 140, 255, 255], 1, 1);
         let sel_box_tex = uploader.upload_rgba_bytes(&[30, 140, 255, 60], 1, 1);
         let drawables = Drawables::new(uploader, initial);
 
@@ -85,9 +87,7 @@ impl<T: Drawable> Scene<T> {
             cursor_pos: (0.0, 0.0),
             input_mode: InputMode::default(),
             primary_touch: None,
-            sel_border_tex,
             sel_box_tex,
-            sel_border: 3.0,
             nudge_px: 10.0,
         }
     }
@@ -182,56 +182,31 @@ impl<T: Drawable> Scene<T> {
 
     /// Render the scene.
     ///
-    /// **Pass 1 (back-to-front by Z):** user drawables, each wrapped in selection
-    /// halos and tints when in Edit mode.
+    /// **Pass 1 (back-to-front by Z):** user drawables; selected ones receive a
+    /// colour tint that blends with the texture's own RGB while preserving alpha,
+    /// so only non-transparent areas appear tinted.
     /// **Pass 2 (always on top):** rubber-band rectangle, if active.
     pub fn render(&mut self) {
         let sorted = self.drawables.z_sorted_indices();
-        let sel_border = self.sel_border;
         let edit = self.scene_mode == SceneMode::Edit;
 
-        // Estimate capacity: each selected drawable gets 3 quads (halo, user, tint),
-        // unselected gets 1.  Add 1 for the rubber-band.
-        let mut quads: Vec<Quad<'_>> = Vec::with_capacity(self.drawables.entries.len() * 2 + 1);
+        let mut quads: Vec<Quad<'_>> = Vec::with_capacity(self.drawables.entries.len() + 1);
 
         for &i in &sorted {
             let e = &self.drawables.entries[i];
-            let (x, y, w, h) = (
-                e.drawable.x(),
-                e.drawable.y(),
-                e.drawable.width(),
-                e.drawable.height(),
-            );
-
-            if edit && e.selected {
-                // Halo behind the sprite.
-                quads.push(Quad {
-                    x: x - sel_border,
-                    y: y - sel_border,
-                    width: w + sel_border * 2.0,
-                    height: h + sel_border * 2.0,
-                    texture: &self.sel_border_tex,
-                });
-            }
-
+            let tint = if edit && e.selected {
+                SELECTION_TINT
+            } else {
+                NO_TINT
+            };
             quads.push(Quad {
-                x,
-                y,
-                width: w,
-                height: h,
+                x: e.drawable.x(),
+                y: e.drawable.y(),
+                width: e.drawable.width(),
+                height: e.drawable.height(),
                 texture: &e.texture,
+                tint,
             });
-
-            if edit && e.selected {
-                // Semi-transparent tint over the sprite.
-                quads.push(Quad {
-                    x,
-                    y,
-                    width: w,
-                    height: h,
-                    texture: &self.sel_box_tex,
-                });
-            }
         }
 
         // Rubber-band rectangle (always on top, edit mode only).
@@ -246,6 +221,7 @@ impl<T: Drawable> Scene<T> {
                     width: rw,
                     height: rh,
                     texture: &self.sel_box_tex,
+                    tint: NO_TINT,
                 });
             }
         }

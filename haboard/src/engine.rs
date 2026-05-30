@@ -24,11 +24,15 @@ var<uniform> screen: ScreenUniform;
 struct VertIn {
     @location(0) position: vec2<f32>,
     @location(1) uv:       vec2<f32>,
+    /// RGB tint colour + mix factor in the alpha channel.
+    /// mix factor 0.0 = no tint, 1.0 = full tint colour.
+    @location(2) tint:     vec4<f32>,
 }
 
 struct VertOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0)       uv:       vec2<f32>,
+    @location(1)       tint:     vec4<f32>,
 }
 
 @vertex
@@ -41,6 +45,7 @@ fn vs_main(in: VertIn) -> VertOut {
         1.0,
     );
     out.uv = in.uv;
+    out.tint = in.tint;
     return out;
 }
 
@@ -49,7 +54,10 @@ fn vs_main(in: VertIn) -> VertOut {
 
 @fragment
 fn fs_main(in: VertOut) -> @location(0) vec4<f32> {
-    return textureSample(t_diffuse, s_diffuse, in.uv);
+    let color = textureSample(t_diffuse, s_diffuse, in.uv);
+    // Mix tint into RGB only; alpha is preserved so transparent areas stay transparent.
+    let rgb = mix(color.rgb, in.tint.rgb, in.tint.a);
+    return vec4<f32>(rgb, color.a);
 }
 "#;
 
@@ -62,11 +70,12 @@ fn fs_main(in: VertOut) -> @location(0) vec4<f32> {
 struct Vertex {
     position: [f32; 2],
     uv: [f32; 2],
+    tint: [f32; 4],
 }
 
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
+    const ATTRIBS: [wgpu::VertexAttribute; 3] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -88,6 +97,8 @@ pub(crate) struct Quad<'a> {
     pub width: f32,
     pub height: f32,
     pub texture: &'a Texture,
+    /// RGB tint + mix factor. `[r, g, b, mix]` where `mix = 0.0` means no tint.
+    pub tint: [f32; 4],
 }
 
 // ---------------------------------------------------------------------------
@@ -373,18 +384,22 @@ impl Engine {
                     Vertex {
                         position: [x0, y0],
                         uv: [0.0, 0.0],
+                        tint: q.tint,
                     },
                     Vertex {
                         position: [x0, y1],
                         uv: [0.0, 1.0],
+                        tint: q.tint,
                     },
                     Vertex {
                         position: [x1, y1],
                         uv: [1.0, 1.0],
+                        tint: q.tint,
                     },
                     Vertex {
                         position: [x1, y0],
                         uv: [1.0, 0.0],
+                        tint: q.tint,
                     },
                 ]);
             }
