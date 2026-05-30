@@ -478,10 +478,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "haboard",
- "image",
- "pollster",
  "postcard",
- "serde",
  "winit",
 ]
 
@@ -741,6 +738,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "image",
+ "pollster",
  "serde",
  "wgpu",
  "winit",
