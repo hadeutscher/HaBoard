@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use winit::{
     event::{ElementState, KeyEvent, MouseButton, TouchPhase, WindowEvent},
-    keyboard::{Key, NamedKey},
+    keyboard::{Key, ModifiersState, NamedKey},
     window::Window,
 };
 
@@ -82,6 +82,8 @@ pub struct Scene<T: Drawable> {
     touch_drags: HashMap<u64, TouchDrag>,
     /// Touch ID currently driving rubber-band selection, if any.
     rubber_band_touch: Option<u64>,
+    /// Current keyboard modifier state, kept in sync via [`WindowEvent::ModifiersChanged`].
+    modifiers: ModifiersState,
 
     // Overlay texture: semi-transparent blue for the rubber-band rectangle.
     sel_box_tex: Arc<Texture>,
@@ -107,6 +109,7 @@ impl<T: Drawable> Scene<T> {
             input_mode: InputMode::default(),
             touch_drags: HashMap::new(),
             rubber_band_touch: None,
+            modifiers: ModifiersState::empty(),
             sel_box_tex,
             nudge_px: 10.0,
         }
@@ -169,6 +172,18 @@ impl<T: Drawable> Scene<T> {
                 match touch.phase {
                     TouchPhase::Started => {
                         match self.find_hit_for_touch(tx, ty) {
+                            Some(idx)
+                                if self.scene_mode == SceneMode::Edit
+                                    && self.modifiers.control_key() =>
+                            {
+                                // Ctrl+touch: toggle selection, no drag.
+                                let was_selected = self.drawables.entries[idx].selected;
+                                self.drawables.entries[idx].selected = !was_selected;
+                                if !was_selected {
+                                    let new_z = self.drawables.max_z() + 1.0;
+                                    self.drawables.entries[idx].drawable.set_z(new_z);
+                                }
+                            }
                             Some(idx) => {
                                 // Skip if another finger is already dragging this drawable.
                                 let already_claimed = self
@@ -209,7 +224,8 @@ impl<T: Drawable> Scene<T> {
                                 }
                             }
                             None if self.scene_mode == SceneMode::Edit
-                                && self.rubber_band_touch.is_none() =>
+                                && self.rubber_band_touch.is_none()
+                                && !self.modifiers.control_key() =>
                             {
                                 // Empty space in Edit mode — start rubber-band selection.
                                 self.rubber_band_touch = Some(touch.id);
@@ -247,6 +263,10 @@ impl<T: Drawable> Scene<T> {
                 true
             }
             WindowEvent::KeyboardInput { event, .. } => self.on_key(event),
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+                true
+            }
             _ => false,
         }
     }
@@ -358,36 +378,49 @@ impl<T: Drawable> Scene<T> {
                     })
                     .map(|(i, e)| (i, e.selected));
 
-                match hit {
-                    Some((i, already_selected)) => {
-                        if !already_selected {
+                if self.modifiers.control_key() {
+                    // Ctrl+click: toggle this drawable's selection; no drag.
+                    if let Some((i, was_selected)) = hit {
+                        self.drawables.entries[i].selected = !was_selected;
+                        if !was_selected {
+                            // Bring newly selected drawable to front.
+                            let new_z = self.drawables.max_z() + 1.0;
+                            self.drawables.entries[i].drawable.set_z(new_z);
+                        }
+                    }
+                    // Ctrl+click on empty space: leave selection unchanged.
+                } else {
+                    match hit {
+                        Some((i, already_selected)) => {
+                            if !already_selected {
+                                for e in &mut self.drawables.entries {
+                                    e.selected = false;
+                                }
+                                // Bring to front: assign z = max_z + 1.
+                                let new_z = self.drawables.max_z() + 1.0;
+                                self.drawables.entries[i].drawable.set_z(new_z);
+                                self.drawables.entries[i].selected = true;
+                            }
+                            // Drag all selected drawables.
+                            let start_positions: Vec<(usize, f32, f32)> = self
+                                .drawables
+                                .entries
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, e)| e.selected)
+                                .map(|(i, e)| (i, e.drawable.x(), e.drawable.y()))
+                                .collect();
+                            self.input_mode = InputMode::Dragging {
+                                start_mouse: (mx, my),
+                                start_positions,
+                            };
+                        }
+                        None => {
                             for e in &mut self.drawables.entries {
                                 e.selected = false;
                             }
-                            // Bring to front: assign z = max_z + 1.
-                            let new_z = self.drawables.max_z() + 1.0;
-                            self.drawables.entries[i].drawable.set_z(new_z);
-                            self.drawables.entries[i].selected = true;
+                            self.input_mode = InputMode::Selecting { start: (mx, my) };
                         }
-                        // Drag all selected drawables.
-                        let start_positions: Vec<(usize, f32, f32)> = self
-                            .drawables
-                            .entries
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, e)| e.selected)
-                            .map(|(i, e)| (i, e.drawable.x(), e.drawable.y()))
-                            .collect();
-                        self.input_mode = InputMode::Dragging {
-                            start_mouse: (mx, my),
-                            start_positions,
-                        };
-                    }
-                    None => {
-                        for e in &mut self.drawables.entries {
-                            e.selected = false;
-                        }
-                        self.input_mode = InputMode::Selecting { start: (mx, my) };
                     }
                 }
             }
