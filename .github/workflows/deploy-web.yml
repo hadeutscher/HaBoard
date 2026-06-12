@@ -1,0 +1,57 @@
+name: Deploy web demo to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Allow the deploy job to publish to Pages via OIDC.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time; cancel superseded runs.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # web-demo is excluded from the root workspace; it has its own lockfile.
+          workspaces: web-demo
+
+      - name: Install Trunk
+        run: |
+          TRUNK_VERSION=v0.21.14
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xzf - -C "$HOME/.cargo/bin" trunk
+
+      - name: Build web demo
+        working-directory: web-demo
+        # Project Pages are served under /<repo>/, so asset URLs must be prefixed.
+        run: trunk build --release --public-url "/HaBoard/"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web-demo/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
