@@ -4,9 +4,14 @@ A GPU-accelerated 2D sprite engine in Rust, built on [wgpu](https://wgpu.rs) and
 
 ```
 gpu-test/
-├── haboard/     # Library crate — engine, scene, drawables, textures
-└── demo-app/    # Binary crate — demo application
+├── haboard/        # Library crate — engine, scene, drawables, textures
+├── demo-app/       # Desktop binary — demo application
+├── web-demo/       # Web (wasm) example — runs in the browser
+└── android-demo/   # Android example — runs on device/emulator
 ```
+
+The same engine and the shared demo scene (`haboard::demo`, behind the `demo-scene`
+feature) run on desktop, web, and Android from one code path.
 
 ---
 
@@ -60,10 +65,9 @@ fn main() {
         // handle custom events here
     });
 
-    runner.run();
-
-    // Retrieve final state for persistence.
-    let saved = runner.sprites();
+    // On desktop, `run` blocks until the window closes and returns the final
+    // sprites for persistence. (On web use `spawn`; on Android use `run_with`.)
+    let saved = runner.run();
 }
 ```
 
@@ -150,6 +154,43 @@ graph TD
 | `sprite` | `Sprite` — built-in serializable `Drawable` |
 | `texture` | GPU texture with CPU-side RGBA copy for alpha hit-testing |
 | `textures` | Procedural generators: `checkerboard`, `solid`, `gradient`, `circle` |
+
+---
+
+## Platforms
+
+`haboard` targets desktop, web, and Android from a single codebase. The two
+example crates are **excluded from the default workspace build** (they only link
+for their own targets) — build each from its own directory.
+
+**Desktop**
+
+```sh
+cargo run -p demo-app
+```
+
+**Web (wasm)** — via [Trunk](https://trunkrs.dev):
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install trunk
+cd web-demo && trunk serve --release      # http://127.0.0.1:8080
+```
+
+WebGPU is used where available (Chrome/Edge), with a WebGL fallback (Firefox/Safari).
+
+**Android** — via [cargo-apk](https://crates.io/crates/cargo-apk) (needs the Android SDK + NDK):
+
+```sh
+rustup target add aarch64-linux-android   # or x86_64-linux-android for an emulator
+cargo install cargo-apk
+cd android-demo && cargo apk run
+```
+
+Platform notes: the web path initialises the GPU asynchronously (no blocking) and
+attaches a full-page canvas; Android releases and recreates the GPU surface across
+suspend/resume. Drag-and-drop image import and `scene.bin` persistence are
+desktop-only.
 
 ---
 

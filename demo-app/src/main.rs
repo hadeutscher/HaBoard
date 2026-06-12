@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use haboard::{SceneMode, SceneRunner, Sprite, textures};
+use haboard::{SceneMode, SceneRunner, Sprite, demo};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -58,59 +58,22 @@ fn save_scene(path: &str, sprites: &[Sprite]) {
 }
 
 // ---------------------------------------------------------------------------
-// Default scene
-// ---------------------------------------------------------------------------
-
-fn default_sprites() -> Vec<Sprite> {
-    vec![
-        Sprite::new(20.0, 20.0, 300.0, 260.0, textures::gradient(128, 128)),
-        Sprite::new(360.0, 40.0, 192.0, 192.0, textures::checkerboard(64, 64, 8)),
-        Sprite::new(
-            50.0,
-            420.0,
-            96.0,
-            96.0,
-            textures::solid(32, 32, [210, 50, 50, 255]),
-        ),
-        Sprite::new(
-            180.0,
-            420.0,
-            96.0,
-            96.0,
-            textures::solid(32, 32, [50, 100, 220, 255]),
-        ),
-        Sprite::new(
-            120.0,
-            100.0,
-            144.0,
-            144.0,
-            textures::solid(48, 48, [40, 200, 80, 160]),
-        ),
-        Sprite::new(
-            500.0,
-            310.0,
-            128.0,
-            128.0,
-            textures::circle(128, [255, 160, 20]),
-        ),
-    ]
-}
-
-// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 const SAVE_PATH: &str = "scene.bin";
 
 fn main() {
+    env_logger::init();
+
     let cli = Cli::parse();
 
     let sprites = load_scene(SAVE_PATH).unwrap_or_else(|| {
         println!("No saved scene found, starting with defaults.");
-        default_sprites()
+        demo::default_sprites()
     });
 
-    let mut runner = SceneRunner::new(sprites, cli.mode.into());
-    runner.run();
-    save_scene(SAVE_PATH, &runner.sprites());
+    let runner = SceneRunner::new(sprites, cli.mode.into());
+    let final_sprites = runner.run();
+    save_scene(SAVE_PATH, &final_sprites);
 }

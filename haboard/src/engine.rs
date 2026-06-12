@@ -113,7 +113,10 @@ pub(crate) struct Quad<'a> {
 /// drawable collection.
 pub struct Engine {
     window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
+    /// Kept so the surface can be recreated after an Android suspend/resume cycle.
+    instance: wgpu::Instance,
+    /// `None` while the platform has taken the surface away (Android suspend).
+    surface: Option<wgpu::Surface<'static>>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -305,7 +308,8 @@ impl Engine {
 
         Self {
             window,
-            surface,
+            instance,
+            surface: Some(surface),
             device,
             queue,
             config,
@@ -329,6 +333,11 @@ impl Engine {
         &self.window
     }
 
+    /// Current surface size in physical pixels (`width`, `height`).
+    pub fn size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
     /// Handle a window resize.
     pub fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
@@ -336,12 +345,43 @@ impl Engine {
         }
         self.config.width = size.width;
         self.config.height = size.height;
-        self.surface.configure(&self.device, &self.config);
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.config);
+        }
         self.queue.write_buffer(
             &self.screen_uniform,
             0,
             bytemuck::cast_slice(&[size.width as f32, size.height as f32]),
         );
+    }
+
+    /// Release the current surface (e.g. on Android suspend, when the native
+    /// window is destroyed). The device, queue, and pipeline survive; only the
+    /// surface is dropped. Rendering becomes a no-op until [`recreate_surface`].
+    ///
+    /// [`recreate_surface`]: Engine::recreate_surface
+    pub fn drop_surface(&mut self) {
+        self.surface = None;
+    }
+
+    /// Recreate the surface for a (possibly new) window after a suspend/resume
+    /// cycle, reconfiguring it to the window's current size.
+    pub fn recreate_surface(&mut self, window: Arc<Window>) {
+        let size = window.inner_size();
+        let surface = self
+            .instance
+            .create_surface(Arc::clone(&window))
+            .expect("failed to recreate surface");
+        self.config.width = size.width.max(1);
+        self.config.height = size.height.max(1);
+        surface.configure(&self.device, &self.config);
+        self.queue.write_buffer(
+            &self.screen_uniform,
+            0,
+            bytemuck::cast_slice(&[self.config.width as f32, self.config.height as f32]),
+        );
+        self.window = window;
+        self.surface = Some(surface);
     }
 
     /// Build a [`TextureUploader`] that shares this engine's device, queue, and
@@ -360,15 +400,19 @@ impl Engine {
     /// Pass 1 (user drawables, Z-sorted) and pass 2 (overlays) are both
     /// submitted as a single flat `quads` slice by the caller ([`Scene`](crate::Scene)).
     pub(crate) fn draw_quads(&mut self, quads: &[Quad<'_>]) {
-        let output = match self.surface.get_current_texture() {
+        // No surface (e.g. between an Android suspend and the next resume).
+        let Some(surface) = &self.surface else {
+            return;
+        };
+        let output = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex)
             | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
+                surface.configure(&self.device, &self.config);
                 return;
             }
             other => {
-                eprintln!("Surface unavailable: {other:?}");
+                log::warn!("Surface unavailable: {other:?}");
                 return;
             }
         };

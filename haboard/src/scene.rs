@@ -140,6 +140,22 @@ impl<T: Drawable> Scene<T> {
         self.engine.resize(size);
     }
 
+    /// Current surface size in physical pixels (`width`, `height`).
+    pub fn size(&self) -> (u32, u32) {
+        self.engine.size()
+    }
+
+    /// Release the GPU surface (Android suspend). Rendering is a no-op until
+    /// [`recreate_surface`](Self::recreate_surface) is called.
+    pub fn drop_surface(&mut self) {
+        self.engine.drop_surface();
+    }
+
+    /// Recreate the GPU surface for a (possibly new) window after resume.
+    pub fn recreate_surface(&mut self, window: Arc<Window>) {
+        self.engine.recreate_surface(window);
+    }
+
     // ── Event handling ───────────────────────────────────────────────────────
 
     pub fn handle_window_event(&mut self, event: &WindowEvent) -> bool {

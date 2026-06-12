@@ -1,0 +1,15 @@
+[package]
+name = "web-demo"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+haboard = { path = "../haboard", features = ["demo-scene"] }
+winit = "0.30"
+wasm-bindgen = "0.2"
+log = "0.4"
+console_log = "1"
+console_error_panic_hook = "0.1"

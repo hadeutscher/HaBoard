@@ -3,10 +3,24 @@ name = "haboard"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Bundles the shared demo scene (haboard::demo) used by the example crates.
+demo-scene = []
+
 [dependencies]
 wgpu = "29"
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive", "rc"] }
+log = "0.4"
+
+# Native + Android block on async GPU init; the web path uses spawn_local instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.3"
+
+# Web: WebGL fallback backend + async executor for non-blocking GPU init.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "29", features = ["webgl"] }
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Element", "HtmlCanvasElement"] }

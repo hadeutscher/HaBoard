@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-haboard = { path = "../haboard" }
+haboard = { path = "../haboard", features = ["demo-scene"] }
 postcard = { version = "1", features = ["alloc"] }
 winit = "0.30"
+env_logger = "0.11"

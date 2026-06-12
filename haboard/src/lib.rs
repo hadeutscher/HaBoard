@@ -1,3 +1,5 @@
+#[cfg(feature = "demo-scene")]
+pub mod demo;
 pub mod drawable;
 pub mod drawables;
 pub mod engine;
@@ -13,5 +15,5 @@ pub use drawables::Drawables;
 pub use engine::Engine;
 pub use image_data::ImageData;
 pub use scene::{Scene, SceneMode};
-pub use scene_runner::SceneRunner;
+pub use scene_runner::{SceneRunner, UserEvent};
 pub use sprite::Sprite;
