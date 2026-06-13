@@ -593,8 +593,8 @@ impl<T: Drawable> Scene<T> {
     /// `moving` holds the dragged entries' `(index, start_x, start_y)` and
     /// `(dx, dy)` is the raw drag delta. Returns `(adjx, adjy)` to add to the
     /// delta so the group's bounding box snaps to nearby static objects; `(0, 0)`
-    /// when snapping is disabled (`snap_px <= 0.0`), Ctrl is held (temporary
-    /// override), or nothing is within range.
+    /// when snapping is disabled (`snap_px <= 0.0`), Ctrl is not held, or nothing
+    /// is within range.
     fn snap_adjustment(&self, moving: &[(usize, f32, f32)], dx: f32, dy: f32) -> (f32, f32) {
         if self.snap_px <= 0.0 || moving.is_empty() || !self.modifiers.control_key() {
             return (0.0, 0.0);
