@@ -13,14 +13,21 @@ winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive", "rc"] }
+postcard = { version = "1", features = ["alloc"] }
 log = "0.4"
 
 # Native + Android block on async GPU init; the web path uses spawn_local instead.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.3"
 
-# Web: WebGL fallback backend + async executor for non-blocking GPU init.
+# Desktop scene persistence locates a per-user app data directory.
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+directories = "5"
+
+# Web: WebGL fallback backend + async executor for non-blocking GPU init, plus
+# localStorage (web-sys "Storage") and base64 for scene persistence.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { version = "29", features = ["webgl"] }
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Element", "HtmlCanvasElement"] }
+web-sys = { version = "0.3", features = ["Window", "Element", "HtmlCanvasElement", "Storage"] }
+base64 = "0.22"

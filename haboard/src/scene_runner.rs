@@ -18,13 +18,13 @@ use std::sync::Arc;
 
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{ElementState, MouseButton, TouchPhase, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::ModifiersState,
     window::{Window, WindowAttributes, WindowId},
 };
 
-use crate::{Engine, Scene, SceneMode, Sprite};
+use crate::{Engine, Scene, SceneMode, SceneStore, Sprite};
 
 /// Callback type for [`SceneRunner::on_event`].
 type EventHandler = dyn FnMut(&WindowEvent, &ModifiersState, Option<&mut Scene<Sprite>>);
@@ -84,6 +84,9 @@ pub struct SceneRunner {
     /// Images larger than this are scaled down proportionally. Default: `400.0`.
     pub max_drop_dim: f32,
     event_handler: Option<Box<EventHandler>>,
+    /// Optional persistence backend; when set, the scene autosaves after each
+    /// committing interaction (drag release, touch end, edit keypress, drop).
+    store: Option<Box<dyn SceneStore>>,
 }
 
 impl SceneRunner {
@@ -98,7 +101,17 @@ impl SceneRunner {
             modifiers: ModifiersState::empty(),
             max_drop_dim: 400.0,
             event_handler: None,
+            store: None,
         }
+    }
+
+    /// Attach a persistence backend. The scene autosaves through it after each
+    /// committing interaction (drag release, touch end, edit keypress, image
+    /// drop). Loading the initial scene is the caller's responsibility — pass
+    /// the result of [`SceneStore::load`] to [`SceneRunner::new`].
+    pub fn with_store(mut self, store: Box<dyn SceneStore>) -> Self {
+        self.store = Some(store);
+        self
     }
 
     /// Register a callback for window events not directly handled by
@@ -226,6 +239,36 @@ impl SceneRunner {
         self.state = AppState::Ready(Box::new(scene));
     }
 
+    /// Persist the current scene through the attached store, if any.
+    fn save(&self) {
+        if let (Some(store), AppState::Ready(scene)) = (&self.store, &self.state) {
+            let sprites: Vec<Sprite> = scene.drawables.iter().cloned().collect();
+            store.save(&sprites);
+        }
+    }
+
+    /// Whether handling `event` may have committed a change worth persisting:
+    /// the end of a drag (mouse/touch release) or an edit keypress.
+    fn commits_scene_change(event: &WindowEvent) -> bool {
+        match event {
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            }
+            | WindowEvent::KeyboardInput {
+                event:
+                    winit::event::KeyEvent {
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => true,
+            WindowEvent::Touch(t) => matches!(t.phase, TouchPhase::Ended | TouchPhase::Cancelled),
+            _ => false,
+        }
+    }
+
     /// Handle a file dragged and dropped onto the window (desktop only).
     ///
     /// Only acts in [`SceneMode::Edit`]. Non-image files are reported and
@@ -332,6 +375,7 @@ impl ApplicationHandler<UserEvent> for SceneRunner {
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             WindowEvent::DroppedFile(ref path) => {
                 self.handle_dropped_file(path);
+                self.save();
             }
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -348,8 +392,9 @@ impl ApplicationHandler<UserEvent> for SceneRunner {
                 if let WindowEvent::ModifiersChanged(mods) = &event {
                     self.modifiers = mods.state();
                 }
+                let mut handled = false;
                 if let AppState::Ready(scene) = &mut self.state {
-                    scene.handle_window_event(&event);
+                    handled = scene.handle_window_event(&event);
                 }
                 // Offer unhandled events to the caller's hook.
                 // Use take()/replace() to avoid holding a borrow on self while
@@ -361,6 +406,10 @@ impl ApplicationHandler<UserEvent> for SceneRunner {
                     };
                     handler(&event, &self.modifiers, scene);
                     self.event_handler = Some(handler);
+                }
+                // Autosave once the interaction that just landed is a commit point.
+                if handled && Self::commits_scene_change(&event) {
+                    self.save();
                 }
             }
         }
