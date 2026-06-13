@@ -50,7 +50,7 @@ The demo loads `scene.bin` from the working directory (or starts with default sp
 The simplest path is `SceneRunner`, which handles window creation, the event loop, and drag-and-drop:
 
 ```rust
-use haboard::{SceneRunner, SceneMode, Sprite, textures};
+use haboard::{DroppedImage, FileStore, SceneMode, SceneRunner, SceneStore, Sprite, textures};
 
 fn main() {
     let sprites = vec![
@@ -58,28 +58,36 @@ fn main() {
         Sprite::new(300.0, 50.0, 128.0, 128.0, textures::circle(128, [255, 160, 20])),
     ];
 
+    let store = FileStore::app_data();
+    let sprites = store
+        .as_ref()
+        .and_then(|s: &FileStore| SceneStore::<Sprite>::load(s))
+        .unwrap_or(sprites);
+
     let mut runner = SceneRunner::new(sprites, SceneMode::Edit);
 
-    // Optional: hook into window events (e.g. Ctrl+S to save).
+    // Optional: hook into window events (e.g. Ctrl+S shortcuts).
     runner.on_event(|event, modifiers, scene| {
         // handle custom events here
     });
 
-    // On desktop, `run` blocks until the window closes and returns the final
-    // sprites for persistence. (On web use `spawn`; on Android use `run_with`.)
-    let saved = runner.run();
+    // Persist after each committing interaction (drag release, keypress, drop).
+    if let Some(store) = store {
+        runner = runner.on_change(move |scene| {
+            let items: Vec<Sprite> = scene.drawables.iter().cloned().collect();
+            store.save(&items);
+        });
+    }
+
+    // Turn a dropped image file into a Sprite.
+    runner = runner.on_drop_image(|d: DroppedImage| {
+        Sprite::new(d.x, d.y, d.width, d.height, d.image)
+    });
+
+    // On desktop, `run` blocks until the window closes.
+    // (On web use `spawn`; on Android use `run_with`.)
+    runner.run();
 }
-```
-
-Persistence is the application's responsibility. The demo uses `postcard`:
-
-```rust
-// Save
-let bytes = postcard::to_allocvec(&runner.sprites())?;
-std::fs::write("scene.bin", bytes)?;
-
-// Load
-let sprites: Vec<Sprite> = postcard::from_bytes(&std::fs::read("scene.bin")?)?;
 ```
 
 ---
@@ -147,7 +155,7 @@ graph TD
 |---|---|
 | `engine` | wgpu device, queue, render pipeline, `draw_quads` |
 | `scene` | `Scene<T>` — drives interaction and rendering via `handle_window_event` / `render` |
-| `scene_runner` | `SceneRunner` — ready-made `ApplicationHandler` wrapping a `Scene<Sprite>` |
+| `scene_runner` | `SceneRunner<T>` — ready-made `ApplicationHandler` wrapping a `Scene<T>`; `on_change` for persistence, `on_drop_image` for file drops |
 | `drawables` | `Drawables<T>` — GPU-texture-owning collection with selection state |
 | `drawable` | `Drawable` trait |
 | `image_data` | `ImageData` — `Rgba` or `Encoded`; Arc-backed, serializable |

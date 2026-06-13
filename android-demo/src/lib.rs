@@ -4,9 +4,9 @@
 //! `cargo apk run` (requires the Android SDK + NDK and an installed
 //! `aarch64-linux-android` / `x86_64-linux-android` Rust target).
 
-use haboard::{FileStore, SceneMode, SceneRunner, SceneStore, UserEvent, demo};
+use haboard::{demo, FileStore, SceneMode, SceneRunner, SceneStore, Sprite, UserEvent};
 use winit::event_loop::EventLoop;
-use winit::platform::android::{EventLoopBuilderExtAndroid, activity::AndroidApp};
+use winit::platform::android::{activity::AndroidApp, EventLoopBuilderExtAndroid};
 
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
@@ -15,7 +15,7 @@ fn android_main(app: AndroidApp) {
     );
 
     // Persist into the app's private data dir; capture it before `app` is moved
-    // into the event loop. The runner autosaves through this store on edits.
+    // into the event loop. Save back on each committing edit via on_change.
     let store = app.internal_data_path().map(FileStore::in_dir);
 
     let event_loop = EventLoop::<UserEvent>::with_user_event()
@@ -25,13 +25,16 @@ fn android_main(app: AndroidApp) {
 
     let sprites = store
         .as_ref()
-        .and_then(|s| s.load())
+        .and_then(|s: &FileStore| SceneStore::<Sprite>::load(s))
         .unwrap_or_else(demo::default_sprites);
     // Edit mode so the demo sprites (which default to `locked`) can be selected
     // and dragged by touch; Run mode would block dragging locked sprites.
     let mut runner = SceneRunner::new(sprites, SceneMode::Edit);
     if let Some(store) = store {
-        runner = runner.with_store(Box::new(store));
+        runner = runner.on_change(move |scene| {
+            let items: Vec<Sprite> = scene.drawables.iter().cloned().collect();
+            store.save(&items);
+        });
     }
     runner.run_with(event_loop);
 }

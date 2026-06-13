@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use haboard::{FileStore, SceneMode, SceneRunner, SceneStore, demo};
+use haboard::{DroppedImage, FileStore, SceneMode, SceneRunner, SceneStore, Sprite, demo};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -40,17 +40,21 @@ fn main() {
 
     let cli = Cli::parse();
 
-    // Persist the scene to the per-user app data directory; the runner autosaves
-    // through this store after each edit.
+    // Load from the per-user app data directory; persist back on each edit.
     let store = FileStore::app_data();
     let sprites = store
         .as_ref()
-        .and_then(|s| s.load())
+        .and_then(|s: &FileStore| SceneStore::<Sprite>::load(s))
         .unwrap_or_else(demo::default_sprites);
 
     let mut runner = SceneRunner::new(sprites, cli.mode.into());
     if let Some(store) = store {
-        runner = runner.with_store(Box::new(store));
+        runner = runner.on_change(move |scene| {
+            let items: Vec<Sprite> = scene.drawables.iter().cloned().collect();
+            store.save(&items);
+        });
     }
+    runner =
+        runner.on_drop_image(|d: DroppedImage| Sprite::new(d.x, d.y, d.width, d.height, d.image));
     runner.run();
 }

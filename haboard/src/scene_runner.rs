@@ -4,10 +4,12 @@
 //! handles window creation, GPU init, event routing to the scene, drag-and-drop
 //! image import (desktop only), and the Android suspend/resume surface
 //! lifecycle.  Hook into any remaining window events via [`SceneRunner::on_event`].
+//! Wire persistence through [`SceneRunner::on_change`], which fires after each
+//! committing interaction.
 //!
 //! ## Platforms
 //! - **Desktop:** [`SceneRunner::run`] builds the event loop, blocks on GPU init
-//!   with `pollster`, and returns the final sprites when the window closes.
+//!   with `pollster`, and returns when the window closes.
 //! - **Web (wasm):** [`SceneRunner::spawn`] starts the loop non-blocking and
 //!   initialises the GPU asynchronously, delivering the ready [`Engine`] back
 //!   through an [`EventLoopProxy`] as a [`UserEvent`].
@@ -24,10 +26,10 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
-use crate::{Engine, Scene, SceneMode, SceneStore, Sprite};
+use crate::{Drawable, Engine, Scene, SceneMode};
 
 /// Callback type for [`SceneRunner::on_event`].
-type EventHandler = dyn FnMut(&WindowEvent, &ModifiersState, Option<&mut Scene<Sprite>>);
+type EventHandler<T> = dyn FnMut(&WindowEvent, &ModifiersState, Option<&mut Scene<T>>);
 
 /// Custom event delivered to the winit event loop.
 ///
@@ -39,7 +41,7 @@ pub enum UserEvent {
 }
 
 /// Lifecycle state of the runner.
-enum AppState {
+enum AppState<T: Drawable> {
     /// No window/engine yet (before the first `resumed`).
     Uninitialized,
     /// Window created, GPU init in flight (web async path only).
@@ -47,31 +49,60 @@ enum AppState {
     Loading,
     /// Engine ready; owns the live scene. Boxed — a `Scene` is large relative
     /// to the other (empty) variants.
-    Ready(Box<Scene<Sprite>>),
+    Ready(Box<Scene<T>>),
 }
 
-/// A ready-made [`winit`] application that owns a [`Scene<Sprite>`] and
-/// handles the full application lifecycle.
+/// An image file dragged and dropped onto the window (desktop only).
+///
+/// Passed to the [`on_drop_image`] callback; the callback returns the `T` to
+/// add to the scene.
+///
+/// [`on_drop_image`]: SceneRunner::on_drop_image
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub struct DroppedImage {
+    /// Decoded RGBA pixel data.
+    pub image: crate::ImageData,
+    /// X position (pixels from window top-left) to place the item.
+    pub x: f32,
+    /// Y position (pixels from window top-left) to place the item.
+    pub y: f32,
+    /// Display width in pixels (scaled to fit [`max_drop_dim`]).
+    ///
+    /// [`max_drop_dim`]: SceneRunner::max_drop_dim
+    pub width: f32,
+    /// Display height in pixels (scaled to fit [`max_drop_dim`]).
+    ///
+    /// [`max_drop_dim`]: SceneRunner::max_drop_dim
+    pub height: f32,
+}
+
+/// A ready-made [`winit`] application that owns a [`Scene<T>`] and handles the
+/// full application lifecycle.
 ///
 /// `SceneRunner` takes care of window creation, GPU init, resize, redraw,
 /// drag-and-drop image import (desktop), and the Android surface lifecycle.
 /// Register an [`on_event`] callback to handle any additional window events
-/// (such as keyboard shortcuts) yourself.
+/// (such as keyboard shortcuts) yourself.  Wire persistence through
+/// [`on_change`], which fires after each committing interaction.
 ///
 /// # Example
 /// ```no_run
-/// use haboard::{SceneRunner, SceneMode};
+/// use haboard::{SceneRunner, SceneMode, Sprite};
 ///
-/// let sprites = vec![];
-/// let _final = SceneRunner::new(sprites, SceneMode::Edit).run();
+/// let mut runner = SceneRunner::<Sprite>::new(Vec::new(), SceneMode::Edit);
+/// runner.on_event(|event, modifiers, scene| {
+///     // handle custom events here
+/// });
+/// runner.run();
 /// ```
 ///
 /// [`on_event`]: SceneRunner::on_event
-pub struct SceneRunner {
+/// [`on_change`]: SceneRunner::on_change
+pub struct SceneRunner<T: Drawable> {
     scene_mode: SceneMode,
     /// Consumed once when the engine becomes ready.
-    initial_sprites: Option<Vec<Sprite>>,
-    state: AppState,
+    initial: Option<Vec<T>>,
+    state: AppState<T>,
     /// Proxy used to deliver the async-initialised engine back to the loop.
     proxy: Option<EventLoopProxy<UserEvent>>,
     /// Last known cursor position, used to centre drag-dropped images.
@@ -83,35 +114,29 @@ pub struct SceneRunner {
     /// Maximum display size (longest side, in pixels) for drag-dropped images.
     /// Images larger than this are scaled down proportionally. Default: `400.0`.
     pub max_drop_dim: f32,
-    event_handler: Option<Box<EventHandler>>,
-    /// Optional persistence backend; when set, the scene autosaves after each
-    /// committing interaction (drag release, touch end, edit keypress, drop).
-    store: Option<Box<dyn SceneStore>>,
+    event_handler: Option<Box<EventHandler<T>>>,
+    #[allow(clippy::type_complexity)]
+    on_change: Option<Box<dyn FnMut(&Scene<T>)>>,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    on_drop_image: Option<Box<dyn FnMut(DroppedImage) -> T>>,
 }
 
-impl SceneRunner {
-    /// Create a new runner with the given initial sprites and interaction mode.
-    pub fn new(initial_sprites: Vec<Sprite>, mode: SceneMode) -> Self {
+impl<T: Drawable + 'static> SceneRunner<T> {
+    /// Create a new runner with the given initial items and interaction mode.
+    pub fn new(initial: Vec<T>, mode: SceneMode) -> Self {
         Self {
             scene_mode: mode,
-            initial_sprites: Some(initial_sprites),
+            initial: Some(initial),
             state: AppState::Uninitialized,
             proxy: None,
             cursor_pos: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
             max_drop_dim: 400.0,
             event_handler: None,
-            store: None,
+            on_change: None,
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+            on_drop_image: None,
         }
-    }
-
-    /// Attach a persistence backend. The scene autosaves through it after each
-    /// committing interaction (drag release, touch end, edit keypress, image
-    /// drop). Loading the initial scene is the caller's responsibility — pass
-    /// the result of [`SceneStore::load`] to [`SceneRunner::new`].
-    pub fn with_store(mut self, store: Box<dyn SceneStore>) -> Self {
-        self.store = Some(store);
-        self
     }
 
     /// Register a callback for window events not directly handled by
@@ -122,41 +147,75 @@ impl SceneRunner {
     /// mutable reference to the scene (if one has been created yet).
     ///
     /// ```no_run
-    /// # use haboard::{SceneRunner, SceneMode};
+    /// # use haboard::{SceneRunner, SceneMode, Sprite};
     /// # use winit::event::WindowEvent;
-    /// let mut runner = SceneRunner::new(vec![], SceneMode::Edit);
+    /// let mut runner = SceneRunner::<Sprite>::new(vec![], SceneMode::Edit);
     /// runner.on_event(|event, modifiers, scene| {
     ///     // handle custom events here
     /// });
     /// ```
     pub fn on_event<F>(&mut self, handler: F)
     where
-        F: FnMut(&WindowEvent, &ModifiersState, Option<&mut Scene<Sprite>>) + 'static,
+        F: FnMut(&WindowEvent, &ModifiersState, Option<&mut Scene<T>>) + 'static,
     {
         self.event_handler = Some(Box::new(handler));
     }
 
-    /// Run the event loop on desktop, blocking until the window is closed, and
-    /// return the final scene sprites for persistence.
+    /// Register a callback invoked after each committing interaction (drag
+    /// release, touch end, edit keypress, image drop).
+    ///
+    /// Use this to persist the scene — the callback receives a shared reference
+    /// to the live scene.
+    ///
+    /// ```no_run
+    /// # use haboard::{SceneRunner, SceneMode, Sprite};
+    /// let runner = SceneRunner::<Sprite>::new(vec![], SceneMode::Edit)
+    ///     .on_change(|scene| {
+    ///         // persist scene here
+    ///     });
+    /// ```
+    pub fn on_change<F>(mut self, handler: F) -> Self
+    where
+        F: FnMut(&Scene<T>) + 'static,
+    {
+        self.on_change = Some(Box::new(handler));
+        self
+    }
+
+    /// Register a callback that turns a dropped image file into a `T`.
+    ///
+    /// When the user drags an image file onto the window (desktop only), the
+    /// runner decodes the image, scales it to fit [`max_drop_dim`], and calls
+    /// this callback to construct the item to add to the scene.
+    ///
+    /// [`max_drop_dim`]: SceneRunner::max_drop_dim
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub fn on_drop_image<F>(mut self, handler: F) -> Self
+    where
+        F: FnMut(DroppedImage) -> T + 'static,
+    {
+        self.on_drop_image = Some(Box::new(handler));
+        self
+    }
+
+    /// Run the event loop on desktop, blocking until the window is closed.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn run(self) -> Vec<Sprite> {
+    pub fn run(self) {
         let event_loop = EventLoop::<UserEvent>::with_user_event()
             .build()
             .expect("Failed to create event loop");
-        self.run_with(event_loop)
+        self.run_with(event_loop);
     }
 
-    /// Run with a caller-supplied event loop, blocking until exit, and return
-    /// the final scene sprites.
+    /// Run with a caller-supplied event loop, blocking until exit.
     ///
     /// Use this on Android, where the event loop must be built from the
     /// `AndroidApp` (`EventLoopBuilderExtAndroid::with_android_app`).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn run_with(mut self, event_loop: EventLoop<UserEvent>) -> Vec<Sprite> {
+    pub fn run_with(mut self, event_loop: EventLoop<UserEvent>) {
         self.proxy = Some(event_loop.create_proxy());
         event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.run_app(&mut self).expect("Event loop error");
-        self.sprites()
     }
 
     /// Start the event loop on the web without blocking the calling thread.
@@ -172,17 +231,6 @@ impl SceneRunner {
         self.proxy = Some(event_loop.create_proxy());
         event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.spawn_app(self);
-    }
-
-    /// Return the current scene's sprites, collected into a `Vec`.
-    ///
-    /// Useful after [`run`](Self::run) returns to retrieve the final scene state
-    /// for persistence or inspection.
-    pub fn sprites(&self) -> Vec<Sprite> {
-        match &self.state {
-            AppState::Ready(scene) => scene.drawables.iter().cloned().collect(),
-            _ => Vec::new(),
-        }
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
@@ -233,17 +281,22 @@ impl SceneRunner {
 
     /// Build the scene from a ready engine and transition to `Ready`.
     fn set_ready(&mut self, engine: Engine) {
-        let sprites = self.initial_sprites.take().unwrap_or_default();
-        let mut scene = Scene::new(engine, sprites, self.scene_mode);
+        let items = self.initial.take().unwrap_or_default();
+        let mut scene = Scene::new(engine, items, self.scene_mode);
         scene.render();
         self.state = AppState::Ready(Box::new(scene));
     }
 
-    /// Persist the current scene through the attached store, if any.
-    fn save(&self) {
-        if let (Some(store), AppState::Ready(scene)) = (&self.store, &self.state) {
-            let sprites: Vec<Sprite> = scene.drawables.iter().cloned().collect();
-            store.save(&sprites);
+    /// Invoke the `on_change` callback with the current scene.
+    ///
+    /// Uses take()/replace() to avoid holding a borrow on `self` while the
+    /// callback runs.
+    fn invoke_on_change(&mut self) {
+        if let AppState::Ready(scene) = &self.state
+            && let Some(mut cb) = self.on_change.take()
+        {
+            cb(scene);
+            self.on_change = Some(cb);
         }
     }
 
@@ -272,13 +325,22 @@ impl SceneRunner {
     /// Handle a file dragged and dropped onto the window (desktop only).
     ///
     /// Only acts in [`SceneMode::Edit`]. Non-image files are reported and
-    /// ignored.
+    /// ignored. Requires an [`on_drop_image`] callback to be registered.
+    ///
+    /// [`on_drop_image`]: SceneRunner::on_drop_image
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     fn handle_dropped_file(&mut self, path: &std::path::Path) {
-        let AppState::Ready(scene) = &mut self.state else {
-            return;
-        };
-        if scene.mode() != SceneMode::Edit {
+        {
+            let AppState::Ready(scene) = &self.state else {
+                return;
+            };
+            if scene.mode() != SceneMode::Edit {
+                return;
+            }
+        }
+
+        // No callback registered — nothing to do.
+        if self.on_drop_image.is_none() {
             return;
         }
 
@@ -301,20 +363,34 @@ impl SceneRunner {
         let scale = (self.max_drop_dim / img_w as f32)
             .min(self.max_drop_dim / img_h as f32)
             .min(1.0);
-        let w = img_w as f32 * scale;
-        let h = img_h as f32 * scale;
-        let x = (self.cursor_pos.0 - w / 2.0).max(0.0);
-        let y = (self.cursor_pos.1 - h / 2.0).max(0.0);
+        let width = img_w as f32 * scale;
+        let height = img_h as f32 * scale;
+        let x = (self.cursor_pos.0 - width / 2.0).max(0.0);
+        let y = (self.cursor_pos.1 - height / 2.0).max(0.0);
 
         let image = crate::ImageData::rgba(img_w, img_h, img.into_raw());
-        let z = scene.drawables.max_z() + 1.0;
-        let mut sprite = Sprite::new(x, y, w, h, image);
-        sprite.z = z;
-        scene.drawables.push(sprite);
+        let dropped = DroppedImage {
+            image,
+            x,
+            y,
+            width,
+            height,
+        };
+
+        // Take the callback, build the item, restore the callback — avoids
+        // holding a borrow on self while the callback runs.
+        if let Some(mut cb) = self.on_drop_image.take() {
+            let mut item = cb(dropped);
+            if let AppState::Ready(scene) = &mut self.state {
+                item.set_z(scene.drawables.max_z() + 1.0);
+                scene.drawables.push(item);
+            }
+            self.on_drop_image = Some(cb);
+        }
     }
 }
 
-impl ApplicationHandler<UserEvent> for SceneRunner {
+impl<T: Drawable + 'static> ApplicationHandler<UserEvent> for SceneRunner<T> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // Re-resume after an Android suspend: recreate the surface on a fresh
         // window rather than rebuilding the whole engine.
@@ -375,7 +451,7 @@ impl ApplicationHandler<UserEvent> for SceneRunner {
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             WindowEvent::DroppedFile(ref path) => {
                 self.handle_dropped_file(path);
-                self.save();
+                self.invoke_on_change();
             }
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -407,9 +483,9 @@ impl ApplicationHandler<UserEvent> for SceneRunner {
                     handler(&event, &self.modifiers, scene);
                     self.event_handler = Some(handler);
                 }
-                // Autosave once the interaction that just landed is a commit point.
+                // Invoke on_change once the interaction that just landed is a commit point.
                 if handled && Self::commits_scene_change(&event) {
-                    self.save();
+                    self.invoke_on_change();
                 }
             }
         }

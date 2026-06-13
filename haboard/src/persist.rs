@@ -1,9 +1,9 @@
 //! Cross-platform scene persistence.
 //!
-//! A [`SceneStore`] loads and saves a `Vec<Sprite>`. [`SceneRunner`] autosaves
-//! through one of these after each committing interaction, so the latest scene
-//! is always persisted without relying on a clean shutdown (which the web has
-//! no notion of).
+//! A [`SceneStore`] loads and saves any list of serde-compatible items.
+//! Apps own their store, load up front, and wire persistence through the
+//! [`on_change`] callback on [`SceneRunner`]; the runner itself no longer
+//! holds a store.
 //!
 //! - Desktop & Android: [`FileStore`] — a `scene.bin` file. Desktop locates it
 //!   in the per-user app data directory via [`FileStore::app_data`]; Android
@@ -11,20 +11,21 @@
 //! - Web: [`LocalStorageStore`] — base64-encoded bytes in `localStorage`.
 //!
 //! [`SceneRunner`]: crate::SceneRunner
+//! [`on_change`]: crate::SceneRunner::on_change
 
-use crate::Sprite;
+use serde::{Serialize, de::DeserializeOwned};
 
-/// Loads and saves the scene's sprites.
-pub trait SceneStore {
-    /// Load a previously saved scene, or `None` if absent/unreadable.
-    fn load(&self) -> Option<Vec<Sprite>>;
-    /// Persist the given sprites. Failures are logged and otherwise ignored.
-    fn save(&self, sprites: &[Sprite]);
+/// Loads and saves a list of items of type `T`.
+pub trait SceneStore<T> {
+    /// Load a previously saved list, or `None` if absent/unreadable.
+    fn load(&self) -> Option<Vec<T>>;
+    /// Persist the given items. Failures are logged and otherwise ignored.
+    fn save(&self, items: &[T]);
 }
 
-/// Serialise sprites to the on-disk/wire format (postcard).
-fn encode(sprites: &[Sprite]) -> Option<Vec<u8>> {
-    match postcard::to_allocvec(sprites) {
+/// Serialise items to the on-disk/wire format (postcard).
+fn encode<T: Serialize>(items: &[T]) -> Option<Vec<u8>> {
+    match postcard::to_allocvec(items) {
         Ok(bytes) => Some(bytes),
         Err(e) => {
             log::error!("failed to serialise scene: {e}");
@@ -33,10 +34,10 @@ fn encode(sprites: &[Sprite]) -> Option<Vec<u8>> {
     }
 }
 
-/// Deserialise sprites from the on-disk/wire format (postcard).
-fn decode(bytes: &[u8]) -> Option<Vec<Sprite>> {
-    match postcard::from_bytes::<Vec<Sprite>>(bytes) {
-        Ok(sprites) => Some(sprites),
+/// Deserialise items from the on-disk/wire format (postcard).
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Option<Vec<T>> {
+    match postcard::from_bytes::<Vec<T>>(bytes) {
+        Ok(items) => Some(items),
         Err(e) => {
             log::warn!("failed to read saved scene: {e}");
             None
@@ -55,10 +56,11 @@ pub use file::FileStore;
 mod file {
     use std::path::PathBuf;
 
-    use super::{SceneStore, decode, encode};
-    use crate::Sprite;
+    use serde::{Serialize, de::DeserializeOwned};
 
-    /// Saves the scene to a `scene.bin` file.
+    use super::{SceneStore, decode, encode};
+
+    /// Saves items to a `scene.bin` file.
     pub struct FileStore {
         path: PathBuf,
     }
@@ -84,14 +86,14 @@ mod file {
         }
     }
 
-    impl SceneStore for FileStore {
-        fn load(&self) -> Option<Vec<Sprite>> {
+    impl<T: Serialize + DeserializeOwned> SceneStore<T> for FileStore {
+        fn load(&self) -> Option<Vec<T>> {
             let bytes = std::fs::read(&self.path).ok()?;
             decode(&bytes)
         }
 
-        fn save(&self, sprites: &[Sprite]) {
-            let Some(bytes) = encode(sprites) else {
+        fn save(&self, items: &[T]) {
+            let Some(bytes) = encode(items) else {
                 return;
             };
             if let Some(parent) = self.path.parent()
@@ -118,11 +120,11 @@ pub use local::LocalStorageStore;
 mod local {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as B64;
+    use serde::{Serialize, de::DeserializeOwned};
 
     use super::{SceneStore, decode, encode};
-    use crate::Sprite;
 
-    /// Saves the scene as a base64 string in browser `localStorage`.
+    /// Saves items as a base64 string in browser `localStorage`.
     pub struct LocalStorageStore {
         key: String,
     }
@@ -138,15 +140,15 @@ mod local {
         }
     }
 
-    impl SceneStore for LocalStorageStore {
-        fn load(&self) -> Option<Vec<Sprite>> {
+    impl<T: Serialize + DeserializeOwned> SceneStore<T> for LocalStorageStore {
+        fn load(&self) -> Option<Vec<T>> {
             let b64 = Self::storage()?.get_item(&self.key).ok()??;
             let bytes = B64.decode(b64).ok()?;
             decode(&bytes)
         }
 
-        fn save(&self, sprites: &[Sprite]) {
-            let Some(bytes) = encode(sprites) else {
+        fn save(&self, items: &[T]) {
+            let Some(bytes) = encode(items) else {
                 return;
             };
             if let Some(storage) = Self::storage() {

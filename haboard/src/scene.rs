@@ -127,8 +127,20 @@ fn snap_delta(moving: Rect, others: &[Rect], threshold: f32) -> (f32, f32) {
     let (mut dx, mut dy) = (0.0_f32, 0.0_f32);
     let (mut dx_abs, mut dy_abs) = (threshold, threshold); // inclusive threshold
     for o in others {
-        let x_overlap = overlaps(moving.left(), moving.right(), o.left(), o.right(), threshold);
-        let y_overlap = overlaps(moving.top(), moving.bottom(), o.top(), o.bottom(), threshold);
+        let x_overlap = overlaps(
+            moving.left(),
+            moving.right(),
+            o.left(),
+            o.right(),
+            threshold,
+        );
+        let y_overlap = overlaps(
+            moving.top(),
+            moving.bottom(),
+            o.top(),
+            o.bottom(),
+            threshold,
+        );
 
         // Horizontal correction (aligns/touches vertical edges) needs the objects
         // to overlap vertically, otherwise they couldn't touch along that seam.
