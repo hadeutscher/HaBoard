@@ -596,7 +596,7 @@ impl<T: Drawable> Scene<T> {
     /// when snapping is disabled (`snap_px <= 0.0`), Ctrl is held (temporary
     /// override), or nothing is within range.
     fn snap_adjustment(&self, moving: &[(usize, f32, f32)], dx: f32, dy: f32) -> (f32, f32) {
-        if self.snap_px <= 0.0 || moving.is_empty() || self.modifiers.control_key() {
+        if self.snap_px <= 0.0 || moving.is_empty() || !self.modifiers.control_key() {
             return (0.0, 0.0);
         }
 
