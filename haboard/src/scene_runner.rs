@@ -76,6 +76,9 @@ pub struct DroppedImage {
     pub height: f32,
 }
 
+pub type OnChangeCallback<T> = Box<dyn FnMut(&Scene<T>)>;
+pub type OnDropImageCallback<T> = Box<dyn FnMut(DroppedImage) -> T>;
+
 /// A ready-made [`winit`] application that owns a [`Scene<T>`] and handles the
 /// full application lifecycle.
 ///
@@ -115,10 +118,9 @@ pub struct SceneRunner<T: Drawable> {
     /// Images larger than this are scaled down proportionally. Default: `400.0`.
     pub max_drop_dim: f32,
     event_handler: Option<Box<EventHandler<T>>>,
-    #[allow(clippy::type_complexity)]
-    on_change: Option<Box<dyn FnMut(&Scene<T>)>>,
+    on_change: Option<OnChangeCallback<T>>,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-    on_drop_image: Option<Box<dyn FnMut(DroppedImage) -> T>>,
+    on_drop_image: Option<OnDropImageCallback<T>>,
 }
 
 impl<T: Drawable + 'static> SceneRunner<T> {
