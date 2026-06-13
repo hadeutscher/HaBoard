@@ -77,6 +77,7 @@ pub struct DroppedImage {
 }
 
 pub type OnChangeCallback<T> = Box<dyn FnMut(&Scene<T>)>;
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub type OnDropImageCallback<T> = Box<dyn FnMut(DroppedImage) -> T>;
 
 /// A ready-made [`winit`] application that owns a [`Scene<T>`] and handles the
