@@ -498,6 +498,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "demo-app-lite"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "haboard",
+ "pollster",
+ "winit",
+]
+
+[[package]]
 name = "directories"
 version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

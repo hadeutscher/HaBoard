@@ -1,5 +1,5 @@
 [workspace]
-members = ["haboard", "demo-app"]
+members = ["haboard", "demo-app", "demo-app-lite"]
 # Excluded from the default desktop build: these only link for the wasm32 /
 # android targets. Build them from their own directories (trunk serve / cargo apk).
 exclude = ["web-demo", "android-demo"]
