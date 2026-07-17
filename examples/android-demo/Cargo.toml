@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 # winit re-exports the matching `AndroidApp`; never depend on android-activity
 # directly or the AndroidApp types will mismatch.
 winit = { version = "0.30", features = ["android-native-activity"] }
-haboard = { path = "../haboard", features = ["demo-scene"] }
+haboard = { path = "../../haboard", features = ["demo-scene"] }
 log = "0.4"
 android_logger = "0.14"
 
