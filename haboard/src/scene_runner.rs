@@ -252,40 +252,17 @@ impl<T: Drawable + 'static> SceneRunner<T> {
         attrs
     }
 
-    /// Keep the web surface matched to the canvas's actual displayed size.
-    ///
-    /// On the web the canvas has no layout at `resumed` time, so the surface is
-    /// first configured at a degenerate size. This re-reads the canvas client
-    /// size (scaled by the device pixel ratio) every frame and resizes when it
-    /// differs — self-healing after the first browser layout and on any later
-    /// window resize. It is a no-op once the sizes agree.
-    #[cfg(target_arch = "wasm32")]
-    fn sync_canvas_size(&mut self) {
-        use winit::dpi::PhysicalSize;
-        use winit::platform::web::WindowExtWebSys;
-
-        let AppState::Ready(scene) = &mut self.state else {
-            return;
-        };
-        let Some(canvas) = scene.window().canvas() else {
-            return;
-        };
-        let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
-        let w = (canvas.client_width().max(0) as f64 * dpr).round() as u32;
-        let h = (canvas.client_height().max(0) as f64 * dpr).round() as u32;
-        if w == 0 || h == 0 || (w, h) == scene.size() {
-            return;
-        }
-        // Set the canvas backing resolution (keeps winit's pointer mapping in
-        // sync) and reconfigure the surface to match.
-        let _ = scene.window().request_inner_size(PhysicalSize::new(w, h));
-        scene.resize(PhysicalSize::new(w, h));
-    }
-
     /// Build the scene from a ready engine and transition to `Ready`.
     fn set_ready(&mut self, engine: Engine) {
         let items = self.initial.take().unwrap_or_default();
         let mut scene = Scene::new(engine, items, self.scene_mode);
+        // On the web, `Engine::new` reads the window's size before the canvas
+        // has any CSS layout (GPU init is async, so by the time we get here
+        // winit's `ResizeObserver` has already updated its tracked size, even
+        // though the `Resized` event itself was dropped — there was no scene
+        // yet to receive it while `AppState` was `Loading`). Catch up once.
+        #[cfg(target_arch = "wasm32")]
+        scene.resize(scene.window().inner_size());
         scene.render();
         self.state = AppState::Ready(Box::new(scene));
     }
@@ -442,8 +419,6 @@ impl<T: Drawable + 'static> ApplicationHandler<UserEvent> for SceneRunner<T> {
     }
 
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        #[cfg(target_arch = "wasm32")]
-        self.sync_canvas_size();
         if let AppState::Ready(scene) = &self.state {
             scene.window().request_redraw();
         }
