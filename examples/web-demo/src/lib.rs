@@ -3,7 +3,7 @@
 //! Renders the shared demo scene on an HTML canvas via WebGPU (with a WebGL
 //! fallback). Built with [Trunk](https://trunkrs.dev): `trunk serve --release`.
 
-use haboard::{demo, LocalStorageStore, SceneMode, SceneRunner, SceneStore, Sprite};
+use haboard::{LocalStorageStore, SceneMode, SceneRunner, SceneStore, Sprite, demo};
 use wasm_bindgen::prelude::wasm_bindgen;
 
 #[wasm_bindgen(start)]

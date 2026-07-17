@@ -1,11 +1,9 @@
-use std::cmp::Ordering;
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
-use crate::drawable::Drawable;
-use crate::image_data::ImageData;
-use crate::texture::Texture;
+use crate::{drawable::Drawable, image_data::ImageData, texture::Texture};
 
-/// Alpha values below this threshold are treated as transparent for hit-testing.
+/// Alpha values below this threshold are treated as transparent for
+/// hit-testing.
 const ALPHA_THRESHOLD: u8 = 10;
 
 // ---------------------------------------------------------------------------
@@ -129,7 +127,8 @@ impl<T: Drawable> DrawableEntry<T> {
 /// texture is stored alongside it for the lifetime of the entry.
 ///
 /// The [`Scene`](crate::Scene) owns a `Drawables<T>` and uses it for rendering
-/// and hit-testing. Obtain an instance through [`Scene::new`](crate::Scene::new).
+/// and hit-testing. Obtain an instance through
+/// [`Scene::new`](crate::Scene::new).
 pub struct Drawables<T: Drawable> {
     pub(crate) entries: Vec<DrawableEntry<T>>,
     pub(crate) uploader: TextureUploader,
@@ -175,7 +174,8 @@ impl<T: Drawable> Drawables<T> {
         self.entries.len()
     }
 
-    /// The maximum Z value across all entries, or `0.0` if the collection is empty.
+    /// The maximum Z value across all entries, or `0.0` if the collection is
+    /// empty.
     pub fn max_z(&self) -> f32 {
         self.entries
             .iter()

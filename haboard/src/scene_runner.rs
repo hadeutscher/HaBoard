@@ -3,13 +3,13 @@
 //! [`SceneRunner`] implements [`winit::application::ApplicationHandler`] and
 //! handles window creation, GPU init, event routing to the scene, drag-and-drop
 //! image import (desktop only), and the Android suspend/resume surface
-//! lifecycle.  Hook into any remaining window events via [`SceneRunner::on_event`].
-//! Wire persistence through [`SceneRunner::on_change`], which fires after each
-//! committing interaction.
+//! lifecycle.  Hook into any remaining window events via
+//! [`SceneRunner::on_event`]. Wire persistence through
+//! [`SceneRunner::on_change`], which fires after each committing interaction.
 //!
 //! ## Platforms
-//! - **Desktop:** [`SceneRunner::run`] builds the event loop, blocks on GPU init
-//!   with `pollster`, and returns when the window closes.
+//! - **Desktop:** [`SceneRunner::run`] builds the event loop, blocks on GPU
+//!   init with `pollster`, and returns when the window closes.
 //! - **Web (wasm):** [`SceneRunner::spawn`] starts the loop non-blocking and
 //!   initialises the GPU asynchronously, delivering the ready [`Engine`] back
 //!   through an [`EventLoopProxy`] as a [`UserEvent`].
@@ -116,7 +116,8 @@ pub struct SceneRunner<T: Drawable> {
     /// [`on_event`]: SceneRunner::on_event
     pub modifiers: ModifiersState,
     /// Maximum display size (longest side, in pixels) for drag-dropped images.
-    /// Images larger than this are scaled down proportionally. Default: `400.0`.
+    /// Images larger than this are scaled down proportionally. Default:
+    /// `400.0`.
     pub max_drop_dim: f32,
     event_handler: Option<Box<EventHandler<T>>>,
     on_change: Option<OnChangeCallback<T>>,

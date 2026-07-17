@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::drawable::Drawable;
-use crate::image_data::ImageData;
+use crate::{drawable::Drawable, image_data::ImageData};
 
-/// A 2D renderable object: a rectangular region of the screen filled with an image.
+/// A 2D renderable object: a rectangular region of the screen filled with an
+/// image.
 ///
 /// `Sprite` is the built-in [`Drawable`] implementation provided by haboard.
 /// Because it contains only plain data and an [`ImageData`] (which is itself
@@ -22,7 +22,8 @@ pub struct Sprite {
     pub z: f32,
     /// Image displayed on this sprite.
     pub image: ImageData,
-    /// When `true`, cannot be dragged in [`SceneMode::Run`](crate::SceneMode::Run).
+    /// When `true`, cannot be dragged in
+    /// [`SceneMode::Run`](crate::SceneMode::Run).
     pub locked: bool,
 }
 

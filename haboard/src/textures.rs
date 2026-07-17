@@ -1,7 +1,8 @@
 //! Procedural image generators.
 //!
 //! Each function returns an [`ImageData`](crate::ImageData) ready to pass
-//! directly to [`Sprite::new`](crate::Sprite::new) or [`Drawables::push`](crate::Drawables::push):
+//! directly to [`Sprite::new`](crate::Sprite::new) or
+//! [`Drawables::push`](crate::Drawables::push):
 //!
 //! ```no_run
 //! use haboard::{Sprite, textures};
@@ -33,7 +34,8 @@ pub fn solid(width: u32, height: u32, color: [u8; 4]) -> ImageData {
     ImageData::rgba(width, height, color.repeat((width * height) as usize))
 }
 
-/// RGB gradient: red increases left→right, green increases top→bottom, blue = 120.
+/// RGB gradient: red increases left→right, green increases top→bottom, blue =
+/// 120.
 pub fn gradient(width: u32, height: u32) -> ImageData {
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {

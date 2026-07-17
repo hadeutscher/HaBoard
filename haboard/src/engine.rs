@@ -3,8 +3,7 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::drawables::TextureUploader;
-use crate::texture::Texture;
+use crate::{drawables::TextureUploader, texture::Texture};
 
 /// Maximum number of quads that can be drawn in a single `draw_quads` call.
 const MAX_QUADS: usize = 10_000;
@@ -113,7 +112,8 @@ pub(crate) struct Quad<'a> {
 /// drawable collection.
 pub struct Engine {
     window: Arc<Window>,
-    /// Kept so the surface can be recreated after an Android suspend/resume cycle.
+    /// Kept so the surface can be recreated after an Android suspend/resume
+    /// cycle.
     instance: wgpu::Instance,
     /// `None` while the platform has taken the surface away (Android suspend).
     surface: Option<wgpu::Surface<'static>>,
@@ -357,7 +357,8 @@ impl Engine {
 
     /// Release the current surface (e.g. on Android suspend, when the native
     /// window is destroyed). The device, queue, and pipeline survive; only the
-    /// surface is dropped. Rendering becomes a no-op until [`recreate_surface`].
+    /// surface is dropped. Rendering becomes a no-op until
+    /// [`recreate_surface`].
     ///
     /// [`recreate_surface`]: Engine::recreate_surface
     pub fn drop_surface(&mut self) {
@@ -398,7 +399,8 @@ impl Engine {
     /// Render a list of textured quads to the surface.
     ///
     /// Pass 1 (user drawables, Z-sorted) and pass 2 (overlays) are both
-    /// submitted as a single flat `quads` slice by the caller ([`Scene`](crate::Scene)).
+    /// submitted as a single flat `quads` slice by the caller
+    /// ([`Scene`](crate::Scene)).
     pub(crate) fn draw_quads(&mut self, quads: &[Quad<'_>]) {
         // No surface (e.g. between an Android suspend and the next resume).
         let Some(surface) = &self.surface else {

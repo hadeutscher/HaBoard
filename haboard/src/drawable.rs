@@ -45,8 +45,8 @@ pub trait Drawable {
     /// Move the object to a new screen position.
     fn set_position(&mut self, x: f32, y: f32);
 
-    /// Whether this drawable is pinned in [`SceneMode::Run`](crate::SceneMode::Run).
-    /// Default: `false`.
+    /// Whether this drawable is pinned in
+    /// [`SceneMode::Run`](crate::SceneMode::Run). Default: `false`.
     fn locked(&self) -> bool {
         false
     }

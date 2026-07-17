@@ -4,9 +4,11 @@
 //! `cargo apk run` (requires the Android SDK + NDK and an installed
 //! `aarch64-linux-android` / `x86_64-linux-android` Rust target).
 
-use haboard::{demo, FileStore, SceneMode, SceneRunner, SceneStore, Sprite, UserEvent};
-use winit::event_loop::EventLoop;
-use winit::platform::android::{activity::AndroidApp, EventLoopBuilderExtAndroid};
+use haboard::{FileStore, SceneMode, SceneRunner, SceneStore, Sprite, UserEvent, demo};
+use winit::{
+    event_loop::EventLoop,
+    platform::android::{EventLoopBuilderExtAndroid, activity::AndroidApp},
+};
 
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {

@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use winit::{
     event::{ElementState, KeyEvent, MouseButton, TouchPhase, WindowEvent},
@@ -7,10 +6,12 @@ use winit::{
     window::Window,
 };
 
-use crate::drawable::Drawable;
-use crate::drawables::Drawables;
-use crate::engine::{Engine, Quad};
-use crate::texture::Texture;
+use crate::{
+    drawable::Drawable,
+    drawables::Drawables,
+    engine::{Engine, Quad},
+    texture::Texture,
+};
 
 // ---------------------------------------------------------------------------
 // Public scene mode
@@ -100,13 +101,13 @@ impl Rect {
 /// `threshold` in absolute value.
 ///
 /// A snap on one axis is only considered against an object the moving rect
-/// **overlaps (or is within `threshold` of overlapping) on the other axis** — so
-/// the two objects share, or are about to share once snapped, a span along which
-/// they would actually meet. (Without the overlap requirement, a far-away object
-/// on the X axis could still pull the moving object's Y to align with it; without
-/// the `threshold` slack, closing a small gap on one axis wouldn't enable the
-/// corner-completing snap on the other.) Each axis is resolved independently; an
-/// axis with no qualifying candidate yields `0.0`.
+/// **overlaps (or is within `threshold` of overlapping) on the other axis** —
+/// so the two objects share, or are about to share once snapped, a span along
+/// which they would actually meet. (Without the overlap requirement, a far-away
+/// object on the X axis could still pull the moving object's Y to align with
+/// it; without the `threshold` slack, closing a small gap on one axis wouldn't
+/// enable the corner-completing snap on the other.) Each axis is resolved
+/// independently; an axis with no qualifying candidate yields `0.0`.
 fn snap_delta(moving: Rect, others: &[Rect], threshold: f32) -> (f32, f32) {
     // Overlap on one axis, treating a gap of up to `margin` as overlapping (the
     // perpendicular snap may close such a gap, making the objects adjacent).
@@ -184,11 +185,13 @@ pub struct Scene<T: Drawable> {
     scene_mode: SceneMode,
     cursor_pos: (f32, f32),
     input_mode: InputMode,
-    /// Per-finger drag state. Each touch point independently drags one drawable.
+    /// Per-finger drag state. Each touch point independently drags one
+    /// drawable.
     touch_drags: HashMap<u64, TouchDrag>,
     /// Touch ID currently driving rubber-band selection, if any.
     rubber_band_touch: Option<u64>,
-    /// Current keyboard modifier state, kept in sync via [`WindowEvent::ModifiersChanged`].
+    /// Current keyboard modifier state, kept in sync via
+    /// [`WindowEvent::ModifiersChanged`].
     modifiers: ModifiersState,
 
     // Overlay texture: semi-transparent blue for the rubber-band rectangle.
@@ -404,8 +407,8 @@ impl<T: Drawable> Scene<T> {
     /// Render the scene.
     ///
     /// **Pass 1 (back-to-front by Z):** user drawables; selected ones receive a
-    /// colour tint that blends with the texture's own RGB while preserving alpha,
-    /// so only non-transparent areas appear tinted.
+    /// colour tint that blends with the texture's own RGB while preserving
+    /// alpha, so only non-transparent areas appear tinted.
     /// **Pass 2 (always on top):** rubber-band rectangle, if active.
     pub fn render(&mut self) {
         let sorted = self.drawables.z_sorted_indices();
@@ -592,9 +595,9 @@ impl<T: Drawable> Scene<T> {
     ///
     /// `moving` holds the dragged entries' `(index, start_x, start_y)` and
     /// `(dx, dy)` is the raw drag delta. Returns `(adjx, adjy)` to add to the
-    /// delta so the group's bounding box snaps to nearby static objects; `(0, 0)`
-    /// when snapping is disabled (`snap_px <= 0.0`), Ctrl is not held, or nothing
-    /// is within range.
+    /// delta so the group's bounding box snaps to nearby static objects; `(0,
+    /// 0)` when snapping is disabled (`snap_px <= 0.0`), Ctrl is not held,
+    /// or nothing is within range.
     fn snap_adjustment(&self, moving: &[(usize, f32, f32)], dx: f32, dy: f32) -> (f32, f32) {
         if self.snap_px <= 0.0 || moving.is_empty() || !self.modifiers.control_key() {
             return (0.0, 0.0);
@@ -637,7 +640,8 @@ impl<T: Drawable> Scene<T> {
         snap_delta(group, &others, self.snap_px)
     }
 
-    /// Find the topmost drawable under a touch point, respecting mode drag rules.
+    /// Find the topmost drawable under a touch point, respecting mode drag
+    /// rules.
     ///
     /// In [`SceneMode::Edit`] all drawables are candidates; in
     /// [`SceneMode::Run`] only unlocked ones are.
@@ -662,7 +666,8 @@ impl<T: Drawable> Scene<T> {
             .map(|(i, _)| i)
     }
 
-    // ── Keyboard shortcuts (Edit mode only) ──────────────────────────────────────────
+    // ── Keyboard shortcuts (Edit mode only)
+    // ──────────────────────────────────────────
 
     fn on_key(&mut self, event: &KeyEvent) -> bool {
         if event.state != ElementState::Pressed {

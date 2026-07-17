@@ -1,6 +1,7 @@
 use haboard::{Drawable, ImageData, textures};
 
-/// A draggable circular object — a custom [`Drawable`] that is not [`haboard::Sprite`].
+/// A draggable circular object — a custom [`Drawable`] that is not
+/// [`haboard::Sprite`].
 ///
 /// Unlike `Sprite`, its texture is generated procedurally (an anti-aliased
 /// filled circle) rather than loaded from image bytes, and it overrides

@@ -118,8 +118,7 @@ pub use local::LocalStorageStore;
 
 #[cfg(target_arch = "wasm32")]
 mod local {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use serde::{Serialize, de::DeserializeOwned};
 
     use super::{SceneStore, decode, encode};
