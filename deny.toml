@@ -21,3 +21,16 @@ allow = [
 
 [advisories]
 unmaintained = "workspace"
+ignore = [
+    # RUSTSEC-2026-0195 and RUSTSEC-2026-0194: unbounded allocation /
+    # quadratic run time in quick-xml (<0.41) when parsing attacker-controlled
+    # XML. Pulled in transitively, Linux-only, via winit ->
+    # smithay-client-toolkit -> wayland-scanner, which uses quick-xml only at
+    # wayland-scanner's own build time to parse its bundled, trusted Wayland
+    # protocol XML files -- never our code, never runtime, never untrusted
+    # input. wayland-scanner 0.31.10 (latest) pins `quick-xml = "0.39"`, so no
+    # compatible upgrade exists yet; revisit once wayland-rs releases a
+    # version depending on quick-xml >= 0.41.
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0194",
+]

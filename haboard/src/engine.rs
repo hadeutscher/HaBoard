@@ -146,6 +146,7 @@ impl Engine {
                 power_preference: wgpu::PowerPreference::default(),
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .unwrap();
@@ -171,6 +172,7 @@ impl Engine {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
@@ -257,7 +259,7 @@ impl Engine {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex::layout()],
+                buffers: &[Some(Vertex::layout())],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -492,6 +494,6 @@ impl Engine {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        self.queue.present(output);
     }
 }

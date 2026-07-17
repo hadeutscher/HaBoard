@@ -1,6 +1,12 @@
 [package]
 name = "haboard"
 version = "0.1.0"
+authors = ["Yuval Deutscher"]
+license = "MPL-2.0"
+description = "A cross-platform GPU-accelerated 2D sprite engine"
+repository = "https://github.com/hadeutscher/HaBoard"
+readme = "../README.md"
+keywords = ["gpu", "sprite", "2d"]
 edition = "2024"
 
 [features]
@@ -8,9 +14,12 @@ edition = "2024"
 demo-scene = []
 
 [dependencies]
-wgpu = "29"
+wgpu = "30"
 winit = "0.30"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+] }
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive", "rc"] }
 postcard = { version = "1", features = ["alloc"] }
@@ -18,16 +27,21 @@ log = "0.4"
 
 # Native + Android block on async GPU init; the web path uses spawn_local instead.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-pollster = "0.3"
+pollster = "1"
 
 # Desktop scene persistence locates a per-user app data directory.
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
-directories = "5"
+directories = "6"
 
 # Web: WebGL fallback backend + async executor for non-blocking GPU init, plus
 # localStorage (web-sys "Storage") and base64 for scene persistence.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wgpu = { version = "29", features = ["webgl"] }
+wgpu = { version = "30", features = ["webgl"] }
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Element", "HtmlCanvasElement", "Storage"] }
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Element",
+    "HtmlCanvasElement",
+    "Storage",
+] }
 base64 = "0.22"

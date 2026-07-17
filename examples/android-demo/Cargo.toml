@@ -2,6 +2,8 @@
 name = "android-demo"
 version = "0.1.0"
 edition = "2024"
+license = "MPL-2.0"
+publish = false
 
 [lib]
 crate-type = ["cdylib"]
@@ -12,7 +14,7 @@ crate-type = ["cdylib"]
 winit = { version = "0.30", features = ["android-native-activity"] }
 haboard = { path = "../../haboard", features = ["demo-scene"] }
 log = "0.4"
-android_logger = "0.14"
+android_logger = "0.15"
 
 [package.metadata.android]
 package = "sh.deut.haboard"
