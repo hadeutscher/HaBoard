@@ -168,15 +168,31 @@ fn snap_delta(moving: Rect, others: &[Rect], threshold: f32) -> (f32, f32) {
             )
         })?
     }
-    fn consider(p: (f32, f32), best: &mut Option<(f32, f32)>, best_dist2: &mut f32) {
+    // Candidates are ranked by how many independent touches they validate
+    // first, magnitude second — a fully-grounded two-axis touch (to one
+    // object or two) always beats a smaller single-axis correction that
+    // doesn't verify anything on the other axis, even though the latter has
+    // a smaller raw magnitude. Without this, a lone object's best-effort
+    // single-axis snap could outrank a genuine two-object corner touch
+    // simply for being numerically closer.
+    fn consider(
+        p: (f32, f32),
+        touches: u8,
+        best: &mut Option<(f32, f32)>,
+        best_touches: &mut u8,
+        best_dist2: &mut f32,
+    ) {
         let dist2 = p.0 * p.0 + p.1 * p.1;
-        if dist2 < *best_dist2 {
+        let better = touches > *best_touches || (touches == *best_touches && dist2 < *best_dist2);
+        if best.is_none() || better {
+            *best_touches = touches;
             *best_dist2 = dist2;
             *best = Some(p);
         }
     }
 
     let mut best: Option<(f32, f32)> = None;
+    let mut best_touches = 0u8;
     let mut best_dist2 = f32::INFINITY;
 
     // Each object's primary correction on its own axis, using moving's
@@ -193,31 +209,35 @@ fn snap_delta(moving: Rect, others: &[Rect], threshold: f32) -> (f32, f32) {
 
     for (i, o) in others.iter().enumerate() {
         // X first, using moving's original vertical span; an optional Y
-        // refinement against this same object once X is applied. Always
-        // taken when available, so it isn't outranked by the unrefined
-        // version.
+        // refinement against this same object once X is applied. The
+        // refinement (when found) makes this a validated two-touch
+        // candidate rather than a one-touch candidate, so it can't be
+        // silently downgraded to competing on magnitude alone against an
+        // unrelated two-touch corner.
         if let Some(dx) = dx0[i] {
-            let dy = dy_for(
+            match dy_for(
                 moving,
                 o,
                 moving.left() + dx,
                 moving.right() + dx,
                 threshold,
-            )
-            .unwrap_or(0.0);
-            consider((dx, dy), &mut best, &mut best_dist2);
+            ) {
+                Some(dy) => consider((dx, dy), 2, &mut best, &mut best_touches, &mut best_dist2),
+                None => consider((dx, 0.0), 1, &mut best, &mut best_touches, &mut best_dist2),
+            }
         }
         // Y first, with an optional X refinement, symmetric to the above.
         if let Some(dy) = dy0[i] {
-            let dx = dx_for(
+            match dx_for(
                 moving,
                 o,
                 moving.top() + dy,
                 moving.bottom() + dy,
                 threshold,
-            )
-            .unwrap_or(0.0);
-            consider((dx, dy), &mut best, &mut best_dist2);
+            ) {
+                Some(dx) => consider((dx, dy), 2, &mut best, &mut best_touches, &mut best_dist2),
+                None => consider((0.0, dy), 1, &mut best, &mut best_touches, &mut best_dist2),
+            }
         }
         // Corner: `o` shares no span with `moving` on either axis, so only a
         // simultaneous zero-gap close on both — via gap-closing (adjacency)
@@ -235,7 +255,13 @@ fn snap_delta(moving: Rect, others: &[Rect], threshold: f32) -> (f32, f32) {
                 .min_by(|a: &f32, b: &f32| a.abs().partial_cmp(&b.abs()).unwrap())
                 .unwrap();
             if dx_c.abs() <= threshold && dy_c.abs() <= threshold {
-                consider((dx_c, dy_c), &mut best, &mut best_dist2);
+                consider(
+                    (dx_c, dy_c),
+                    2,
+                    &mut best,
+                    &mut best_touches,
+                    &mut best_dist2,
+                );
             }
         }
     }
@@ -255,7 +281,7 @@ fn snap_delta(moving: Rect, others: &[Rect], threshold: f32) -> (f32, f32) {
             let b_still_touches =
                 overlaps(moving.left() + dx, moving.right() + dx, b.left(), b.right());
             if a_still_touches && b_still_touches {
-                consider((dx, dy), &mut best, &mut best_dist2);
+                consider((dx, dy), 2, &mut best, &mut best_touches, &mut best_dist2);
             }
         }
     }
@@ -1079,6 +1105,41 @@ mod tests {
         let (dx, dy) = snap_delta(moving, &[a, b], 50.0);
         assert_eq!(dx, -10.0); // right edge of `a` (60) meets moving's left edge
         assert_eq!(dy, 5.0); // top edge of `b` (40) meets moving's bottom edge
+    }
+
+    #[test]
+    fn concave_corner_wins_over_smaller_partial_touch_at_small_threshold() {
+        // Same notch as `snaps_into_concave_corner_of_two_overlapping_objects`,
+        // but with a small threshold (20, matching a real snap_px value).
+        // `a` alone can offer a same-object refinement (dx=-10, then a Y
+        // realignment against `a`'s own top/bottom), but at this threshold
+        // that refinement's candidates (top-top = -25, bottom-bottom = 25,
+        // etc.) all exceed 20, so it can only offer a *one*-touch fallback
+        // (dx=-10, dy=0, magnitude 10) that never actually validates
+        // anything on Y. The genuine corner touch (dx=-10, dy=5, magnitude
+        // ~11.18, touching BOTH `a` and `b`) has a larger raw magnitude but
+        // validates more -- it must still win.
+        let a = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 60.0,
+            h: 60.0,
+        };
+        let b = Rect {
+            x: 40.0,
+            y: 40.0,
+            w: 60.0,
+            h: 60.0,
+        };
+        let moving = Rect {
+            x: 70.0,
+            y: 25.0,
+            w: 10.0,
+            h: 10.0,
+        };
+        let (dx, dy) = snap_delta(moving, &[a, b], 20.0);
+        assert_eq!(dx, -10.0);
+        assert_eq!(dy, 5.0);
     }
 
     #[test]
