@@ -100,78 +100,167 @@ impl Rect {
 /// edge of any rect in `others`, considering only corrections no larger than
 /// `threshold` in absolute value.
 ///
-/// A snap on one axis is only considered against an object the moving rect
-/// **overlaps (or is within `threshold` of overlapping) on the other axis** —
-/// so the two objects share, or are about to share once snapped, a span along
-/// which they would actually meet. (Without the overlap requirement, a far-away
-/// object on the X axis could still pull the moving object's Y to align with
-/// it; without the `threshold` slack, closing a small gap on one axis wouldn't
-/// enable the corner-completing snap on the other.) Each axis is resolved
-/// independently; an axis with no qualifying candidate yields `0.0`.
+/// Candidates are only ever combined when doing so leaves each contributing
+/// object genuinely touched at the *final*, fully-corrected position — never
+/// because each looked touched in isolation:
+///
+/// - A pure single-axis snap needs `moving` to genuinely share a span with that
+///   object on the *other* axis (real overlap, or an exact boundary touch) —
+///   otherwise the two would not actually meet along the corrected edge.
+/// - A same-object two-axis snap is allowed when closing the gap on one axis
+///   (an adjacency correction) newly brings that same object into a real shared
+///   span on the other axis, unlocking a further alignment refinement against
+///   it (e.g. closing an X gap then also aligning tops, once the two share real
+///   vertical extent). This refinement is always taken when available, so a
+///   smaller, less-aligned correction to the same object never outranks it.
+/// - An object sharing no span with `moving` on *either* axis may still offer a
+///   **corner snap**: both axes close to exactly zero against that single
+///   object.
+/// - Two *different* objects can also combine — e.g. nestling into the concave
+///   corner formed by two partially-overlapping rects, touching one on X and
+///   the other on Y — but only when each object's own correction remains valid
+///   (a real shared span) after applying the *other* object's correction too.
+///   Two objects that each merely happen to be within `threshold` on their own
+///   axis, without this final position actually touching either of them, are
+///   rejected.
+///
+/// Among all valid candidates, the one with the smallest magnitude wins.
 fn snap_delta(moving: Rect, others: &[Rect], threshold: f32) -> (f32, f32) {
-    // Overlap on one axis, treating a gap of up to `margin` as overlapping (the
-    // perpendicular snap may close such a gap, making the objects adjacent).
-    fn overlaps(a_lo: f32, a_hi: f32, b_lo: f32, b_hi: f32, margin: f32) -> bool {
-        a_lo <= b_hi + margin && b_lo <= a_hi + margin
+    // Real span overlap: a shared boundary point counts (`<=`), a genuine
+    // gap does not.
+    fn overlaps(a_lo: f32, a_hi: f32, b_lo: f32, b_hi: f32) -> bool {
+        a_lo <= b_hi && b_lo <= a_hi
     }
-    // Keep the smaller-magnitude correction if it is within the running best.
-    fn consider(cands: [f32; 4], best: &mut f32, best_abs: &mut f32) {
-        for cand in cands {
-            let a = cand.abs();
-            if a <= *best_abs {
-                *best_abs = a;
-                *best = cand;
-            }
-        }
+    // Smallest-magnitude candidate within `threshold`, if any.
+    fn best_of(cands: [f32; 4], threshold: f32) -> Option<f32> {
+        cands
+            .into_iter()
+            .filter(|c| c.abs() <= threshold)
+            .min_by(|a: &f32, b: &f32| a.abs().partial_cmp(&b.abs()).unwrap())
     }
-
-    let (mut dx, mut dy) = (0.0_f32, 0.0_f32);
-    let (mut dx_abs, mut dy_abs) = (threshold, threshold); // inclusive threshold
-    for o in others {
-        let x_overlap = overlaps(
-            moving.left(),
-            moving.right(),
-            o.left(),
-            o.right(),
-            threshold,
-        );
-        let y_overlap = overlaps(
-            moving.top(),
-            moving.bottom(),
-            o.top(),
-            o.bottom(),
-            threshold,
-        );
-
-        // Horizontal correction (aligns/touches vertical edges) needs the objects
-        // to overlap vertically, otherwise they couldn't touch along that seam.
-        if y_overlap {
-            consider(
+    // Horizontal correction against `o`, valid only when `o` shares the
+    // vertical span `[y_lo, y_hi]`.
+    fn dx_for(moving: Rect, o: &Rect, y_lo: f32, y_hi: f32, threshold: f32) -> Option<f32> {
+        overlaps(y_lo, y_hi, o.top(), o.bottom()).then(|| {
+            best_of(
                 [
                     o.left() - moving.left(),
                     o.right() - moving.right(),
                     o.left() - moving.right(),
                     o.right() - moving.left(),
                 ],
-                &mut dx,
-                &mut dx_abs,
-            );
-        }
-        // Vertical correction needs horizontal overlap.
-        if x_overlap {
-            consider(
+                threshold,
+            )
+        })?
+    }
+    // Vertical correction against `o`, valid only when `o` shares the
+    // horizontal span `[x_lo, x_hi]`.
+    fn dy_for(moving: Rect, o: &Rect, x_lo: f32, x_hi: f32, threshold: f32) -> Option<f32> {
+        overlaps(x_lo, x_hi, o.left(), o.right()).then(|| {
+            best_of(
                 [
                     o.top() - moving.top(),
                     o.bottom() - moving.bottom(),
                     o.top() - moving.bottom(),
                     o.bottom() - moving.top(),
                 ],
-                &mut dy,
-                &mut dy_abs,
-            );
+                threshold,
+            )
+        })?
+    }
+    fn consider(p: (f32, f32), best: &mut Option<(f32, f32)>, best_dist2: &mut f32) {
+        let dist2 = p.0 * p.0 + p.1 * p.1;
+        if dist2 < *best_dist2 {
+            *best_dist2 = dist2;
+            *best = Some(p);
         }
     }
-    (dx, dy)
+
+    let mut best: Option<(f32, f32)> = None;
+    let mut best_dist2 = f32::INFINITY;
+
+    // Each object's primary correction on its own axis, using moving's
+    // original (unshifted) span on the other axis. These double as this
+    // object's contribution when pairing with a *different* object below.
+    let dx0: Vec<Option<f32>> = others
+        .iter()
+        .map(|o| dx_for(moving, o, moving.top(), moving.bottom(), threshold))
+        .collect();
+    let dy0: Vec<Option<f32>> = others
+        .iter()
+        .map(|o| dy_for(moving, o, moving.left(), moving.right(), threshold))
+        .collect();
+
+    for (i, o) in others.iter().enumerate() {
+        // X first, using moving's original vertical span; an optional Y
+        // refinement against this same object once X is applied. Always
+        // taken when available, so it isn't outranked by the unrefined
+        // version.
+        if let Some(dx) = dx0[i] {
+            let dy = dy_for(
+                moving,
+                o,
+                moving.left() + dx,
+                moving.right() + dx,
+                threshold,
+            )
+            .unwrap_or(0.0);
+            consider((dx, dy), &mut best, &mut best_dist2);
+        }
+        // Y first, with an optional X refinement, symmetric to the above.
+        if let Some(dy) = dy0[i] {
+            let dx = dx_for(
+                moving,
+                o,
+                moving.top() + dy,
+                moving.bottom() + dy,
+                threshold,
+            )
+            .unwrap_or(0.0);
+            consider((dx, dy), &mut best, &mut best_dist2);
+        }
+        // Corner: `o` shares no span with `moving` on either axis, so only a
+        // simultaneous zero-gap close on both — via gap-closing (adjacency)
+        // formulas only, since an edge *alignment* without any shared span
+        // wouldn't create contact at all — counts as a snap.
+        let y_overlap = overlaps(moving.top(), moving.bottom(), o.top(), o.bottom());
+        let x_overlap = overlaps(moving.left(), moving.right(), o.left(), o.right());
+        if !y_overlap && !x_overlap {
+            let dx_c = [o.left() - moving.right(), o.right() - moving.left()]
+                .into_iter()
+                .min_by(|a: &f32, b: &f32| a.abs().partial_cmp(&b.abs()).unwrap())
+                .unwrap();
+            let dy_c = [o.top() - moving.bottom(), o.bottom() - moving.top()]
+                .into_iter()
+                .min_by(|a: &f32, b: &f32| a.abs().partial_cmp(&b.abs()).unwrap())
+                .unwrap();
+            if dx_c.abs() <= threshold && dy_c.abs() <= threshold {
+                consider((dx_c, dy_c), &mut best, &mut best_dist2);
+            }
+        }
+    }
+
+    // Cross-object corners: pair every object's X correction with a
+    // *different* object's Y correction, keeping the pair only if applying
+    // both still leaves each one genuinely touching its own anchor.
+    for (i, a) in others.iter().enumerate() {
+        let Some(dx) = dx0[i] else { continue };
+        for (j, b) in others.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let Some(dy) = dy0[j] else { continue };
+            let a_still_touches =
+                overlaps(moving.top() + dy, moving.bottom() + dy, a.top(), a.bottom());
+            let b_still_touches =
+                overlaps(moving.left() + dx, moving.right() + dx, b.left(), b.right());
+            if a_still_touches && b_still_touches {
+                consider((dx, dy), &mut best, &mut best_dist2);
+            }
+        }
+    }
+
+    best.unwrap_or((0.0, 0.0))
 }
 
 /// Pairs an [`Engine`] with a [`Drawables`] collection and owns all interaction
@@ -889,6 +978,150 @@ mod tests {
         let (dx, dy) = snap_delta(moving, &[other], 20.0);
         assert_eq!(dx, 8.0); // right edge 92 → flush against other's left edge 100
         assert_eq!(dy, -5.0); // top 105 → 100
+    }
+
+    #[test]
+    fn no_mixed_snap_across_unrelated_objects_with_large_threshold() {
+        // Regression test for the reported bug: with a large snap_px, an
+        // object with no real horizontal relationship to `moving` could
+        // still win the Y correction merely for having a close top edge,
+        // because the old gate used the full (now large) threshold as slack
+        // for the perpendicular-overlap check. `x_neighbor` genuinely
+        // overlaps `moving` vertically (same y range) and is a real X snap.
+        // `y_decoy` shares no horizontal span with `moving` at all -- even
+        // after the X snap is applied -- but has a tempting 3px-off top
+        // edge; it must be ignored.
+        let x_neighbor = Rect {
+            x: 50.0,
+            y: 505.0,
+            w: 20.0,
+            h: 20.0,
+        }; // x[50,70] y[505,525], matches moving's y exactly
+        let moving = Rect {
+            x: 75.0,
+            y: 505.0,
+            w: 20.0,
+            h: 20.0,
+        }; // x[75,95] y[505,525], 5px gap to x_neighbor's right edge
+        let y_decoy = Rect {
+            x: 250.0,
+            y: 508.0,
+            w: 20.0,
+            h: 20.0,
+        }; // x[250,270] -- 160px gap even after the X snap; y[508,528], 3px top offset
+        let (dx, dy) = snap_delta(moving, &[x_neighbor, y_decoy], 200.0);
+        assert_eq!(dx, -5.0); // flush against x_neighbor's right edge
+        assert_eq!(dy, 0.0); // NOT -3.0 toward y_decoy -- no real horizontal relationship
+    }
+
+    #[test]
+    fn no_mixed_snap_across_unrelated_objects_with_large_threshold2() {
+        // `x_decoy` shares real X-overlap with `moving` (offers a Y snap);
+        // `y_decoy` shares real Y-overlap with `moving` (offers an X snap).
+        // Neither shares a span with `moving` on both axes at once, so the
+        // result must fully commit to exactly one of them -- not an X
+        // correction from one and a Y correction from the other, which
+        // would land `moving` touching neither. `y_decoy`'s correction
+        // (-79) is smaller than `x_decoy`'s (-80), so it wins outright.
+        let x_decoy = Rect {
+            x: 200.0,
+            y: 100.0,
+            w: 20.0,
+            h: 20.0,
+        };
+        let moving = Rect {
+            x: 199.0,
+            y: 200.0,
+            w: 20.0,
+            h: 20.0,
+        };
+        let y_decoy = Rect {
+            x: 100.0,
+            y: 200.0,
+            w: 20.0,
+            h: 20.0,
+        };
+        let (dx, dy) = snap_delta(moving, &[x_decoy, y_decoy], 100.0);
+        assert_eq!((dx, dy), (-79.0, 0.0));
+    }
+
+    #[test]
+    fn snaps_into_concave_corner_of_two_overlapping_objects() {
+        // `a` and `b` partially overlap each other (share the region
+        // x[40,60] y[40,60]), which carves a concave notch into their
+        // combined silhouette at the point (60, 40): `a`'s right edge to the
+        // left, `b`'s top edge below. `moving` sits in that notch, close to
+        // both edges but touching neither yet. The correct snap touches
+        // BOTH: `a` on X (real Y-overlap: moving's y-span sits inside a's
+        // full height) and `b` on Y (real X-overlap: moving's x-span sits
+        // inside b's full width) -- landing it exactly in the corner.
+        let a = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 60.0,
+            h: 60.0,
+        }; // x[0,60] y[0,60]
+        let b = Rect {
+            x: 40.0,
+            y: 40.0,
+            w: 60.0,
+            h: 60.0,
+        }; // x[40,100] y[40,100]
+        let moving = Rect {
+            x: 70.0,
+            y: 25.0,
+            w: 10.0,
+            h: 10.0,
+        }; // x[70,80] (10px gap to a's right edge), y[25,35] (5px gap to b's top edge)
+        let (dx, dy) = snap_delta(moving, &[a, b], 50.0);
+        assert_eq!(dx, -10.0); // right edge of `a` (60) meets moving's left edge
+        assert_eq!(dy, 5.0); // top edge of `b` (40) meets moving's bottom edge
+    }
+
+    #[test]
+    fn snaps_diagonal_corner_to_single_object() {
+        // `moving` sits diagonally offset from `other`: an 8px gap on X and
+        // a 6px gap on Y, sharing no span on either axis. This is the one
+        // case where a snap is allowed without any real overlap: closing
+        // both gaps at once brings the two rects corner-to-corner against
+        // the SAME object.
+        let other = Rect {
+            x: 100.0,
+            y: 100.0,
+            w: 50.0,
+            h: 50.0,
+        }; // x[100,150] y[100,150]
+        let moving = Rect {
+            x: 42.0,
+            y: 44.0,
+            w: 50.0,
+            h: 50.0,
+        }; // x[42,92] (8px gap) y[44,94] (6px gap)
+        let (dx, dy) = snap_delta(moving, &[other], 20.0);
+        assert_eq!(dx, 8.0);
+        assert_eq!(dy, 6.0);
+    }
+
+    #[test]
+    fn no_partial_corner_snap() {
+        // Diagonal gap where the X gap is closeable within threshold but the
+        // Y gap is far too large. A corner snap requires BOTH gaps to close
+        // against the same object, so neither axis should move.
+        let other = Rect {
+            x: 100.0,
+            y: 100.0,
+            w: 50.0,
+            h: 50.0,
+        };
+        let moving = Rect {
+            x: 42.0,
+            y: -500.0,
+            w: 50.0,
+            h: 50.0,
+        }; // x gap 8 (within 20), y gap huge
+        let (dx, dy) = snap_delta(moving, &[other], 20.0);
+        assert_eq!(dx, 0.0);
+        assert_eq!(dy, 0.0);
     }
 
     #[test]
