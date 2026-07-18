@@ -364,7 +364,7 @@ impl<T: Drawable + 'static> SceneRunner<T> {
             let mut item = cb(dropped);
             if let AppState::Ready(scene) = &mut self.state {
                 item.set_z(scene.drawables.max_z() + 1.0);
-                scene.drawables.push(item);
+                scene.add_drawable(item);
             }
             self.on_drop_image = Some(cb);
         }

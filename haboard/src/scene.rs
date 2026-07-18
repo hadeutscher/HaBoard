@@ -8,7 +8,7 @@ use winit::{
 
 use crate::{
     drawable::Drawable,
-    drawables::Drawables,
+    drawables::{DrawableEntry, Drawables},
     engine::{Engine, Quad},
     snap::{Rect, snap_delta},
     texture::Texture,
@@ -60,6 +60,29 @@ struct TouchDrag {
 }
 
 // ---------------------------------------------------------------------------
+// Undo/redo
+// ---------------------------------------------------------------------------
+
+/// A single reversible edit to the drawable collection, used to implement
+/// undo/redo (Ctrl+Z / Ctrl+Y).
+///
+/// `Added` and `Removed` are exact duals of each other — inverting one always
+/// produces the other — which lets a single [`Scene::invert`] implementation
+/// handle both undo and redo. Both carry explicit indices rather than
+/// assuming entries stay at the tail, because reinserting a `Removed` batch
+/// can land entries at arbitrary (non-contiguous) positions, and a later
+/// undo of *that* redo must remove from those same positions.
+enum Op<T> {
+    /// Drawables moved. `(entry_index, old_x, old_y, new_x, new_y)`.
+    Move(Vec<(usize, f32, f32, f32, f32)>),
+    /// Entries newly present at these (not necessarily contiguous) indices.
+    Added(Vec<usize>),
+    /// Entries removed from these indices, paired with the removed data so
+    /// they can be reinserted exactly where they were.
+    Removed(Vec<(usize, DrawableEntry<T>)>),
+}
+
+// ---------------------------------------------------------------------------
 // Scene
 // ---------------------------------------------------------------------------
 
@@ -98,6 +121,11 @@ pub struct Scene<T: Drawable> {
     /// so repeated pastes cascade diagonally instead of stacking exactly on
     /// top of each other.
     paste_count: u32,
+    /// Undo history (Ctrl+Z): completed edits, most recent last.
+    undo_stack: Vec<Op<T>>,
+    /// Redo history (Ctrl+Y): edits undone since the last new edit, most
+    /// recently undone last. Cleared whenever a new edit is recorded.
+    redo_stack: Vec<Op<T>>,
 
     // Overlay texture: semi-transparent blue for the rubber-band rectangle.
     sel_box_tex: Arc<Texture>,
@@ -130,6 +158,8 @@ impl<T: Drawable> Scene<T> {
             modifiers: ModifiersState::empty(),
             clipboard: Vec::new(),
             paste_count: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             sel_box_tex,
             nudge_px: 10.0,
             snap_px: 20.0,
@@ -151,6 +181,103 @@ impl<T: Drawable> Scene<T> {
             self.rubber_band_touch = None;
         }
         self.scene_mode = mode;
+    }
+
+    /// Add a drawable to the scene, recording an undoable "add" operation
+    /// (Ctrl+Z removes it again).
+    ///
+    /// Prefer this over pushing directly via [`drawables`](Self::drawables)
+    /// whenever the addition should be undoable.
+    pub fn add_drawable(&mut self, drawable: T) {
+        let idx = self.drawables.entries.len();
+        self.drawables.push(drawable);
+        self.record(Op::Added(vec![idx]));
+    }
+
+    /// Whether [`undo`](Self::undo) would currently do anything.
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    /// Whether [`redo`](Self::redo) would currently do anything.
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    /// Undo the most recently recorded edit (Ctrl+Z), if any.
+    pub fn undo(&mut self) {
+        let Some(op) = self.undo_stack.pop() else {
+            return;
+        };
+        let redo_op = self.invert(op);
+        self.redo_stack.push(redo_op);
+        self.input_mode = InputMode::Idle;
+        self.touch_drags.clear();
+    }
+
+    /// Redo the most recently undone edit (Ctrl+Y), if any.
+    pub fn redo(&mut self) {
+        let Some(op) = self.redo_stack.pop() else {
+            return;
+        };
+        let undo_op = self.invert(op);
+        self.undo_stack.push(undo_op);
+        self.input_mode = InputMode::Idle;
+        self.touch_drags.clear();
+    }
+
+    /// Push `op` onto the undo stack. Any previously undone history is
+    /// discarded, since it no longer describes a reachable future state.
+    fn record(&mut self, op: Op<T>) {
+        self.undo_stack.push(op);
+        self.redo_stack.clear();
+    }
+
+    /// Apply the inverse of `op` to the drawable collection, returning the
+    /// op that would reverse *this* application.
+    ///
+    /// This single method drives both undo and redo: undoing pops from
+    /// `undo_stack`, inverts, and pushes the result onto `redo_stack`;
+    /// redoing does the same in the other direction. `Move` is
+    /// self-inverting (old/new swapped); `Added`/`Removed` are exact duals
+    /// of each other.
+    fn invert(&mut self, op: Op<T>) -> Op<T> {
+        match op {
+            Op::Move(moves) => {
+                for &(idx, old_x, old_y, ..) in &moves {
+                    self.drawables.entries[idx]
+                        .drawable
+                        .set_position(old_x, old_y);
+                }
+                Op::Move(
+                    moves
+                        .into_iter()
+                        .map(|(i, ox, oy, nx, ny)| (i, nx, ny, ox, oy))
+                        .collect(),
+                )
+            }
+            Op::Added(mut indices) => {
+                // Remove highest index first so removing one never shifts an
+                // index still waiting to be removed.
+                indices.sort_unstable();
+                let removed: Vec<(usize, DrawableEntry<T>)> = indices
+                    .iter()
+                    .rev()
+                    .map(|&idx| (idx, self.drawables.entries.remove(idx)))
+                    .collect();
+                Op::Removed(removed)
+            }
+            Op::Removed(mut removed) => {
+                // Reinsert lowest index first so inserting one never shifts
+                // a target index still waiting to be inserted at.
+                removed.sort_by_key(|(idx, _)| *idx);
+                let indices = removed.iter().map(|(idx, _)| *idx).collect();
+                for (idx, entry) in removed {
+                    self.drawables.entries.insert(idx, entry);
+                }
+                Op::Added(indices)
+            }
+        }
     }
 
     pub fn window(&self) -> &Arc<Window> {
@@ -291,7 +418,9 @@ impl<T: Drawable> Scene<T> {
                         }
                     }
                     TouchPhase::Ended | TouchPhase::Cancelled => {
-                        self.touch_drags.remove(&touch.id);
+                        if let Some(drag) = self.touch_drags.remove(&touch.id) {
+                            self.record_move(drag.start_positions);
+                        }
                         if self.rubber_band_touch == Some(touch.id) {
                             self.on_release();
                             self.rubber_band_touch = None;
@@ -495,7 +624,29 @@ impl<T: Drawable> Scene<T> {
     }
 
     fn on_release(&mut self) {
+        if let InputMode::Dragging {
+            start_positions, ..
+        } = &self.input_mode
+        {
+            self.record_move(start_positions.clone());
+        }
         self.input_mode = InputMode::Idle;
+    }
+
+    /// Compare `start_positions` (captured at drag start) to the drawables'
+    /// current positions and record a `Move` op for any that actually moved.
+    fn record_move(&mut self, start_positions: Vec<(usize, f32, f32)>) {
+        let moves: Vec<(usize, f32, f32, f32, f32)> = start_positions
+            .into_iter()
+            .filter_map(|(idx, ox, oy)| {
+                let d = &self.drawables.entries[idx].drawable;
+                let (nx, ny) = (d.x(), d.y());
+                (nx != ox || ny != oy).then_some((idx, ox, oy, nx, ny))
+            })
+            .collect();
+        if !moves.is_empty() {
+            self.record(Op::Move(moves));
+        }
     }
 
     /// Compute the edge-snap correction for a group drag.
@@ -597,9 +748,26 @@ impl<T: Drawable> Scene<T> {
             }
             // Delete / Backspace — remove all selected drawables (no repeat).
             Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) if !event.repeat => {
-                self.drawables.entries.retain(|e| !e.selected);
+                let indices: Vec<usize> = self
+                    .drawables
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.selected)
+                    .map(|(i, _)| i)
+                    .collect();
+                // Remove highest index first so removing one never shifts an
+                // index still waiting to be removed.
+                let removed: Vec<(usize, DrawableEntry<T>)> = indices
+                    .into_iter()
+                    .rev()
+                    .map(|i| (i, self.drawables.entries.remove(i)))
+                    .collect();
+                if !removed.is_empty() {
+                    self.record(Op::Removed(removed));
+                }
                 self.input_mode = InputMode::Idle;
-                self.touch_drags.clear(); // entry indices may have shifted after retain
+                self.touch_drags.clear(); // entry indices may have shifted after removal
                 true
             }
             // Arrow keys — nudge selected drawables (repeats while held).
@@ -658,6 +826,7 @@ impl<T: Drawable> Scene<T> {
                 for e in &mut self.drawables.entries {
                     e.selected = false;
                 }
+                let start_idx = self.drawables.entries.len();
                 for mut d in pasted {
                     let (x, y) = (d.x(), d.y());
                     d.set_position(x + offset, y + offset);
@@ -666,6 +835,20 @@ impl<T: Drawable> Scene<T> {
                         last.selected = true;
                     }
                 }
+                let added: Vec<usize> = (start_idx..self.drawables.entries.len()).collect();
+                if !added.is_empty() {
+                    self.record(Op::Added(added));
+                }
+                true
+            }
+            // Ctrl+Z — undo the last recorded edit (repeats while held).
+            Key::Character(c) if c == "z" && self.modifiers.control_key() => {
+                self.undo();
+                true
+            }
+            // Ctrl+Y — redo the last undone edit (repeats while held).
+            Key::Character(c) if c == "y" && self.modifiers.control_key() => {
+                self.redo();
                 true
             }
             _ => false,
@@ -673,9 +856,21 @@ impl<T: Drawable> Scene<T> {
     }
 
     fn nudge_selected(&mut self, dx: f32, dy: f32) {
-        for e in self.drawables.entries.iter_mut().filter(|e| e.selected) {
-            let (x, y) = (e.drawable.x(), e.drawable.y());
-            e.drawable.set_position(x + dx, y + dy);
+        let moves: Vec<(usize, f32, f32, f32, f32)> = self
+            .drawables
+            .entries
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, e)| e.selected)
+            .map(|(i, e)| {
+                let (ox, oy) = (e.drawable.x(), e.drawable.y());
+                let (nx, ny) = (ox + dx, oy + dy);
+                e.drawable.set_position(nx, ny);
+                (i, ox, oy, nx, ny)
+            })
+            .collect();
+        if !moves.is_empty() {
+            self.record(Op::Move(moves));
         }
     }
 
