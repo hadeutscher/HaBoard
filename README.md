@@ -12,7 +12,7 @@ The library lives in `haboard/`; runnable examples for desktop, web, and Android
 - **Rubber-band selection** — drag over empty space in Edit mode to select every drawable the rectangle touches; transparent pixels don't count.
 - **Edge-snap dragging** — hold Ctrl while dragging to snap the dragged object's edges into alignment with nearby objects.
 - **Two modes**
-  - `Edit` — click/drag to select and move, rubber-band selection, keyboard shortcuts (arrows, Delete, `+`/`-`, Escape), drag-and-drop image import.
+  - `Edit` — click/drag to select and move, rubber-band selection, keyboard shortcuts (arrows, Delete, `+`/`-`, Escape, Ctrl+C/Ctrl+V), drag-and-drop image import.
   - `Run` — no selection UI; only unlocked drawables may be dragged.
 
 ---

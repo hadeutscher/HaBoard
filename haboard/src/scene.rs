@@ -67,6 +67,9 @@ struct TouchDrag {
 const SELECTION_TINT: [f32; 4] = [0.12, 0.55, 1.0, 0.35];
 /// No tint — used for unselected sprites and overlay quads.
 const NO_TINT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+/// Pixel offset applied to each successive Ctrl+V paste, so repeated pastes
+/// cascade diagonally instead of stacking exactly on top of each other.
+const PASTE_OFFSET: f32 = 20.0;
 
 // ---------------------------------------------------------------------------
 // Edge snapping
@@ -308,6 +311,13 @@ pub struct Scene<T: Drawable> {
     /// Current keyboard modifier state, kept in sync via
     /// [`WindowEvent::ModifiersChanged`].
     modifiers: ModifiersState,
+    /// Clipboard for copy/paste (Ctrl+C / Ctrl+V): clones of the drawables
+    /// selected at the time of the last copy.
+    clipboard: Vec<T>,
+    /// Number of times the current clipboard contents have been pasted,
+    /// so repeated pastes cascade diagonally instead of stacking exactly on
+    /// top of each other.
+    paste_count: u32,
 
     // Overlay texture: semi-transparent blue for the rubber-band rectangle.
     sel_box_tex: Arc<Texture>,
@@ -338,6 +348,8 @@ impl<T: Drawable> Scene<T> {
             touch_drags: HashMap::new(),
             rubber_band_touch: None,
             modifiers: ModifiersState::empty(),
+            clipboard: Vec::new(),
+            paste_count: 0,
             sel_box_tex,
             nudge_px: 10.0,
             snap_px: 20.0,
@@ -835,6 +847,45 @@ impl<T: Drawable> Scene<T> {
             // - — lower Z of selected drawables (repeats while held).
             Key::Character(c) if c == "-" => {
                 self.adjust_z_selected(-1.0);
+                true
+            }
+            // Ctrl+C — copy selected drawables to the clipboard.
+            Key::Character(c) if c == "c" && self.modifiers.control_key() => {
+                self.clipboard = self
+                    .drawables
+                    .entries
+                    .iter()
+                    .filter(|e| e.selected)
+                    .filter_map(|e| e.drawable.try_clone())
+                    .collect();
+                self.paste_count = 0;
+                true
+            }
+            // Ctrl+V — paste the clipboard, replacing the selection with the
+            // newly pasted drawables (no repeat, so holding the key doesn't
+            // spawn a pile of copies).
+            Key::Character(c) if c == "v" && self.modifiers.control_key() && !event.repeat => {
+                if self.clipboard.is_empty() {
+                    return false;
+                }
+                self.paste_count += 1;
+                let offset = PASTE_OFFSET * self.paste_count as f32;
+                let pasted: Vec<T> = self
+                    .clipboard
+                    .iter()
+                    .filter_map(|d| d.try_clone())
+                    .collect();
+                for e in &mut self.drawables.entries {
+                    e.selected = false;
+                }
+                for mut d in pasted {
+                    let (x, y) = (d.x(), d.y());
+                    d.set_position(x + offset, y + offset);
+                    self.drawables.push(d);
+                    if let Some(last) = self.drawables.entries.last_mut() {
+                        last.selected = true;
+                    }
+                }
                 true
             }
             _ => false,

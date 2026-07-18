@@ -70,4 +70,7 @@ impl Drawable for Sprite {
     fn locked(&self) -> bool {
         self.locked
     }
+    fn try_clone(&self) -> Option<Self> {
+        Some(self.clone())
+    }
 }

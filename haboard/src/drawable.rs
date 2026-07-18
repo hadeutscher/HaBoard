@@ -45,6 +45,16 @@ pub trait Drawable {
     /// Move the object to a new screen position.
     fn set_position(&mut self, x: f32, y: f32);
 
+    /// Attempt to duplicate this drawable, e.g. for copy/paste.
+    ///
+    /// Returns `None` if this drawable can't be duplicated. Default: `None`.
+    fn try_clone(&self) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     /// Whether this drawable is pinned in
     /// [`SceneMode::Run`](crate::SceneMode::Run). Default: `false`.
     fn locked(&self) -> bool {
