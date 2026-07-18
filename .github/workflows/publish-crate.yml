@@ -1,0 +1,46 @@
+name: Publish haboard to crates.io
+
+# Triggers on version tags (v0.1.0, v1.2.3, ...). Push a matching tag to
+# release: `git tag v0.1.0 && git push origin v0.1.0`.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  # Required so the job can request a GitHub OIDC identity token, which
+  # crates-io-auth-action exchanges for a short-lived crates.io publish
+  # token (trusted publishing) -- no long-lived secret needed.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check tag matches Cargo.toml version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          crate_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "haboard") | .version')"
+          if [ "$tag_version" != "$crate_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match haboard's Cargo.toml version ($crate_version)"
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test -p haboard
+
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1.0.5
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish -p haboard
