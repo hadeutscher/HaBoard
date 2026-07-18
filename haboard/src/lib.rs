@@ -7,6 +7,7 @@ pub mod image_data;
 pub mod persist;
 pub mod scene;
 pub mod scene_runner;
+mod snap;
 pub mod sprite;
 pub mod texture;
 pub mod textures;
