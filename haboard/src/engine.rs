@@ -15,6 +15,10 @@ const MAX_QUADS: usize = 10_000;
 const SHADER_SRC: &str = r#"
 struct ScreenUniform {
     size: vec2<f32>,
+    // Pad to 16 bytes. Backends without
+    // `DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED` — WebGL2 among
+    // them — reject a uniform binding whose type is not a multiple of 16.
+    _pad: vec2<f32>,
 }
 
 @group(0) @binding(0)
@@ -130,6 +134,14 @@ pub struct Engine {
     pub clear_color: wgpu::Color,
 }
 
+/// The screen-size uniform payload, padded to the 16-byte multiple that
+/// backends without `DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`
+/// (notably WebGL2) require of a uniform binding. The shader's
+/// `ScreenUniform` carries matching padding; keep the two in step.
+fn screen_uniform_data(width: f32, height: f32) -> [f32; 4] {
+    [width, height, 0.0, 0.0]
+}
+
 impl Engine {
     /// Initialise wgpu and build all fixed GPU resources.
     pub async fn new(window: Arc<Window>) -> Self {
@@ -151,11 +163,28 @@ impl Engine {
             .await
             .unwrap();
 
+        // WebGL2 has no compute stage at all, so `Limits::default()` — which
+        // demands a non-zero `max_compute_workgroups_per_dimension` — is
+        // refused outright on the GL backend, taking down the WebGL fallback
+        // on any browser without WebGPU. Ask for the downlevel baseline
+        // there, but raise the texture/buffer dimensions back to whatever the
+        // adapter actually reports, so a capable GPU isn't pinned to the
+        // 2048px texture floor that baseline would otherwise impose.
+        //
+        // The pipeline below is a plain vertex/fragment sprite shader with one
+        // uniform and one sampled texture, so it fits inside the downlevel
+        // limits without any change to the renderer.
+        let required_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+            wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits())
+        } else {
+            wgpu::Limits::default()
+        };
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Engine device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits,
                 ..Default::default()
             })
             .await
@@ -191,7 +220,10 @@ impl Engine {
         // ── Screen uniform ───────────────────────────────────────────────────
         let screen_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Screen uniform"),
-            contents: bytemuck::cast_slice(&[size.width as f32, size.height as f32]),
+            contents: bytemuck::cast_slice(&screen_uniform_data(
+                size.width as f32,
+                size.height as f32,
+            )),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -295,7 +327,10 @@ impl Engine {
             mapped_at_creation: false,
         });
 
-        // ── Index buffer (static: [0,1,2, 0,2,3] repeated) ───────────────────
+        // ── Index buffer ──────────────────────────────────────────────────────
+        // Static, and pre-baked with each quad's absolute vertex base, so a
+        // draw can select quad `i` by index range alone and never needs a
+        // non-zero `base_vertex` (which WebGL2 cannot do).
         let indices: Vec<u32> = (0..MAX_QUADS as u32)
             .flat_map(|i| {
                 let b = i * 4;
@@ -353,7 +388,7 @@ impl Engine {
         self.queue.write_buffer(
             &self.screen_uniform,
             0,
-            bytemuck::cast_slice(&[size.width as f32, size.height as f32]),
+            bytemuck::cast_slice(&screen_uniform_data(size.width as f32, size.height as f32)),
         );
     }
 
@@ -381,7 +416,10 @@ impl Engine {
         self.queue.write_buffer(
             &self.screen_uniform,
             0,
-            bytemuck::cast_slice(&[self.config.width as f32, self.config.height as f32]),
+            bytemuck::cast_slice(&screen_uniform_data(
+                self.config.width as f32,
+                self.config.height as f32,
+            )),
         );
         self.window = window;
         self.surface = Some(surface);
@@ -489,7 +527,13 @@ impl Engine {
 
             for (i, quad) in quads[..count].iter().enumerate() {
                 pass.set_bind_group(1, &quad.texture.bind_group, &[]);
-                pass.draw_indexed(0..6, (i * 4) as i32, 0..1);
+                // Index into this quad's own six indices, which already carry
+                // the absolute vertex base. Selecting the range here rather
+                // than passing a non-zero `base_vertex` keeps the draw off
+                // `DownlevelFlags::BASE_VERTEX`, which WebGL2 does not have —
+                // there is no base-vertex draw in that API at all.
+                let base = (i * 6) as u32;
+                pass.draw_indexed(base..base + 6, 0, 0..1);
             }
         }
 
