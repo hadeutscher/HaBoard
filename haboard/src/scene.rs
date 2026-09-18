@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use winit::{
     event::{ElementState, KeyEvent, MouseButton, TouchPhase, WindowEvent},
@@ -10,7 +13,7 @@ use crate::{
     drawable::Drawable,
     drawables::{DrawableEntry, Drawables},
     engine::{Engine, Quad},
-    snap::{Rect, snap_delta},
+    snap::{Rect, group_snap_delta},
     texture::Texture,
 };
 
@@ -658,16 +661,16 @@ impl<T: Drawable> Scene<T> {
     /// held, or nothing is within range.
     ///
     /// The correction is computed per member against the other, non-moving
-    /// drawables, and the best-fitting member's `(adjx, adjy)` is applied to
-    /// the whole group — not the group's outer bounding box, which would
-    /// snap based on possibly-empty space at the group's edge rather than
-    /// any drawable actually in the group.
+    /// drawables — never the group's outer bounding box, which would snap
+    /// based on possibly-empty space at the group's edge rather than any
+    /// drawable actually in the group. See [`group_snap_delta`] for how the
+    /// members' individual corrections combine into one rigid-body shift.
     fn snap_adjustment(&self, moving: &[(usize, f32, f32)], dx: f32, dy: f32) -> (f32, f32) {
         if self.snap_px <= 0.0 || moving.is_empty() || !self.modifiers.control_key() {
             return (0.0, 0.0);
         }
 
-        let moving_idx: Vec<usize> = moving.iter().map(|&(idx, _, _)| idx).collect();
+        let moving_idx: HashSet<usize> = moving.iter().map(|&(idx, _, _)| idx).collect();
         let others: Vec<Rect> = self
             .drawables
             .entries
@@ -682,23 +685,22 @@ impl<T: Drawable> Scene<T> {
             })
             .collect();
 
-        moving
+        // Group members at their dragged-but-un-snapped positions, in the
+        // order they were captured at drag start.
+        let group: Vec<Rect> = moving
             .iter()
             .map(|&(idx, sx, sy)| {
                 let d = &self.drawables.entries[idx].drawable;
-                let item = Rect {
+                Rect {
                     x: sx + dx,
                     y: sy + dy,
                     w: d.width(),
                     h: d.height(),
-                };
-                snap_delta(item, &others, self.snap_px)
+                }
             })
-            .min_by(|a, b| {
-                let mag = |p: &(f32, f32)| p.0 * p.0 + p.1 * p.1;
-                mag(a).partial_cmp(&mag(b)).unwrap()
-            })
-            .unwrap_or((0.0, 0.0))
+            .collect();
+
+        group_snap_delta(&group, &others, self.snap_px)
     }
 
     /// Find the topmost drawable under a touch point, respecting mode drag

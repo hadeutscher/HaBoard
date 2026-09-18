@@ -24,6 +24,48 @@ impl Rect {
     }
 }
 
+/// Compute the rigid-body `(dx, dy)` correction for a **group** of moving
+/// rects against the stationary `others`.
+///
+/// `moving` holds the group members at their already-dragged (un-snapped)
+/// positions, in a stable order. The returned correction is applied to every
+/// member, so the group translates as one body.
+///
+/// The aggregation mirrors the multi-select snapping in HaCreator
+/// (`InputHandler` → `ISnappable::DoSnap` → `BoardItem::SnapMoveAllMouseBoundItems`):
+/// each member is visited in turn and looks for its own best snap; a member
+/// that finds one translates the *entire* group by its correction, and the
+/// next member is then evaluated from that already-corrected position. A
+/// member that finds nothing contributes nothing and is simply skipped.
+///
+/// Two properties follow, and both are deliberate:
+///
+/// - A member with no snap candidate cannot veto the group's snap. Picking the
+///   smallest correction across members instead would let any member that has
+///   nothing nearby (correction `(0, 0)`) win outright and cancel a perfectly
+///   good snap found by another member — the defect this replaces.
+/// - The visit is a sequential refinement rather than an independent vote, so
+///   a later member snapping against the position a previous one established
+///   can tighten the fit (e.g. one member lands flush on X, and the next then
+///   finds a Y alignment that only exists at that corrected position).
+pub(crate) fn group_snap_delta(moving: &[Rect], others: &[Rect], threshold: f32) -> (f32, f32) {
+    let mut adj = (0.0f32, 0.0f32);
+    for m in moving {
+        // Evaluate this member from the group's running, corrected position —
+        // HaCreator re-reads each item's live `X`/`Y`, which the previous
+        // member's `SnapMoveAllMouseBoundItems` has already shifted.
+        let item = Rect {
+            x: m.x + adj.0,
+            y: m.y + adj.1,
+            ..*m
+        };
+        if let Some((dx, dy)) = snap_delta_opt(item, others, threshold) {
+            adj = (adj.0 + dx, adj.1 + dy);
+        }
+    }
+    adj
+}
+
 /// Compute the `(dx, dy)` correction that snaps `moving`'s edges to the nearest
 /// edge of any rect in `others`, considering only corrections no larger than
 /// `threshold` in absolute value.
@@ -53,7 +95,10 @@ impl Rect {
 ///   rejected.
 ///
 /// Among all valid candidates, the one with the smallest magnitude wins.
-pub(crate) fn snap_delta(moving: Rect, others: &[Rect], threshold: f32) -> (f32, f32) {
+/// `None` when nothing is in range at all — distinct from a candidate that
+/// happens to need no correction, so a caller can tell "found nothing" from
+/// "already flush".
+fn snap_delta_opt(moving: Rect, others: &[Rect], threshold: f32) -> Option<(f32, f32)> {
     // Real span overlap: a shared boundary point counts (`<=`), a genuine
     // gap does not.
     fn overlaps(a_lo: f32, a_hi: f32, b_lo: f32, b_hi: f32) -> bool {
@@ -214,12 +259,17 @@ pub(crate) fn snap_delta(moving: Rect, others: &[Rect], threshold: f32) -> (f32,
         }
     }
 
-    best.unwrap_or((0.0, 0.0))
+    best
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Rect, snap_delta};
+    use super::{Rect, group_snap_delta, snap_delta_opt};
+
+    /// Single-rect snap with "no candidate" flattened to a zero correction.
+    fn snap_delta(moving: Rect, others: &[Rect], threshold: f32) -> (f32, f32) {
+        snap_delta_opt(moving, others, threshold).unwrap_or((0.0, 0.0))
+    }
 
     #[test]
     fn snaps_aligning_left_edges() {
@@ -547,6 +597,159 @@ mod tests {
         let (dx, dy) = snap_delta(moving, &[other], 20.0);
         assert_eq!(dx, 0.0);
         assert_eq!(dy, 0.0);
+    }
+
+    // ── Group (multi-select) snapping ────────────────────────────────────
+
+    #[test]
+    fn group_member_without_a_candidate_does_not_veto_the_snap() {
+        // Regression test for the multi-select defect: `leader` is 5px shy of
+        // `anchor`'s left edge and should pull the whole group flush, while
+        // `tagalong` sits far away with nothing in range. Under the old
+        // "smallest correction across members" rule, `tagalong`'s empty
+        // (0, 0) was the smallest and cancelled the snap entirely.
+        let anchor = Rect {
+            x: 100.0,
+            y: 0.0,
+            w: 50.0,
+            h: 20.0,
+        };
+        let leader = Rect {
+            x: 75.0,
+            y: 0.0,
+            w: 20.0,
+            h: 20.0,
+        }; // right edge 95, 5px gap to anchor's left edge
+        let tagalong = Rect {
+            x: 5000.0,
+            y: 5000.0,
+            w: 20.0,
+            h: 20.0,
+        };
+        let (dx, dy) = group_snap_delta(&[leader, tagalong], &[anchor], 10.0);
+        assert_eq!(dx, 5.0);
+        assert_eq!(dy, 0.0);
+
+        // Order must not matter when only one member has anything to snap to.
+        let (dx, dy) = group_snap_delta(&[tagalong, leader], &[anchor], 10.0);
+        assert_eq!(dx, 5.0);
+        assert_eq!(dy, 0.0);
+    }
+
+    #[test]
+    fn group_with_no_candidates_at_all_does_not_move() {
+        let anchor = Rect {
+            x: 100.0,
+            y: 100.0,
+            w: 50.0,
+            h: 50.0,
+        };
+        let a = Rect {
+            x: 5000.0,
+            y: 5000.0,
+            w: 20.0,
+            h: 20.0,
+        };
+        let b = Rect {
+            x: 6000.0,
+            y: 6000.0,
+            w: 20.0,
+            h: 20.0,
+        };
+        assert_eq!(group_snap_delta(&[a, b], &[anchor], 20.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn group_translates_rigidly_by_the_snapping_member() {
+        // Only `leader` is near `anchor`; the correction that lands it flush
+        // is the correction the whole group receives — `follower` keeps its
+        // relative offset rather than snapping independently.
+        let anchor = Rect {
+            x: 0.0,
+            y: 100.0,
+            w: 200.0,
+            h: 50.0,
+        }; // wide, so `leader` sits well inside it on X and no X snap is in range
+        let leader = Rect {
+            x: 60.0,
+            y: 105.0,
+            w: 50.0,
+            h: 50.0,
+        }; // tops 5px off, overlaps on X
+        let follower = Rect {
+            x: 60.0,
+            y: 400.0,
+            w: 50.0,
+            h: 50.0,
+        };
+        let (dx, dy) = group_snap_delta(&[leader, follower], &[anchor], 10.0);
+        assert_eq!((dx, dy), (0.0, -5.0));
+    }
+
+    #[test]
+    fn later_member_refines_from_the_corrected_position() {
+        // `x_anchor` gives the first member a pure X snap (5px right). Only
+        // once that shift is applied does the second member share a real
+        // vertical span with `y_anchor`, unlocking a Y alignment of -4. The
+        // sequential visit must compose the two into (5, -4); evaluating the
+        // members independently would miss the second snap entirely.
+        let x_anchor = Rect {
+            x: 100.0,
+            y: 0.0,
+            w: 50.0,
+            h: 20.0,
+        }; // x[100,150] y[0,20]
+        let first = Rect {
+            x: 75.0,
+            y: 0.0,
+            w: 20.0,
+            h: 20.0,
+        }; // x[75,95] -> snaps +5 to x[100,120]
+        let second = Rect {
+            x: 75.0,
+            y: 204.0,
+            w: 20.0,
+            h: 20.0,
+        }; // x[75,95] -> after +5 becomes x[100,120]
+        let y_anchor = Rect {
+            x: 100.0,
+            y: 200.0,
+            w: 20.0,
+            h: 20.0,
+        }; // x[100,120]: no X overlap with second at x[75,95], full overlap at x[100,120]
+        let (dx, dy) = group_snap_delta(&[first, second], &[x_anchor, y_anchor], 10.0);
+        assert_eq!((dx, dy), (5.0, -4.0));
+    }
+
+    #[test]
+    fn single_member_group_matches_the_single_rect_snap() {
+        let other = Rect {
+            x: 100.0,
+            y: 0.0,
+            w: 50.0,
+            h: 20.0,
+        };
+        let moving = Rect {
+            x: 105.0,
+            y: 0.0,
+            w: 20.0,
+            h: 20.0,
+        };
+        assert_eq!(
+            group_snap_delta(&[moving], &[other], 10.0),
+            snap_delta(moving, &[other], 10.0)
+        );
+    }
+
+    #[test]
+    fn empty_group_does_not_move() {
+        let other = Rect {
+            x: 100.0,
+            y: 0.0,
+            w: 50.0,
+            h: 20.0,
+        };
+        assert_eq!(group_snap_delta(&[], &[other], 10.0), (0.0, 0.0));
     }
 
     #[test]
