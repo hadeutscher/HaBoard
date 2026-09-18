@@ -1,6 +1,6 @@
 [package]
 name = "haboard"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Yuval Deutscher"]
 license = "MPL-2.0"
 description = "A cross-platform GPU-accelerated 2D sprite engine"
