@@ -37,9 +37,24 @@ pub fn canvas_physical_size(canvas: &web_sys::HtmlCanvasElement) -> (u32, u32) {
 
 /// Size a canvas's backing store to its CSS box, returning that size.
 ///
+/// `current` is the size the surface is at **now**, not the size you want —
+/// pass [`Scene::size`](crate::Scene::size) or [`Engine::size`](crate::Engine::size),
+/// or `(0, 0)` if there is no surface yet. Passing the desired size instead
+/// compares equal every time, so the store is never resized and the failure
+/// looks like a working program.
+///
 /// Returns `None` if the size is unchanged, so a caller can skip the
 /// reconfiguration — assigning `width`/`height` clears the canvas even when the
 /// value is identical.
+///
+/// ```no_run
+/// # use haboard::{Drawable, Input, Scene, web};
+/// # fn f<T: Drawable>(scene: &mut Scene<T>, canvas: &web_sys::HtmlCanvasElement) {
+/// if let Some((width, height)) = web::resize_canvas_backing_store(canvas, scene.size()) {
+///     scene.handle(Input::Resize { width, height });
+/// }
+/// # }
+/// ```
 pub fn resize_canvas_backing_store(
     canvas: &web_sys::HtmlCanvasElement,
     current: (u32, u32),
