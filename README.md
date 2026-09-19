@@ -1,6 +1,8 @@
 # HaBoard
 
-A cross-platform GPU-accelerated 2D sprite engine in Rust, built on [wgpu](https://wgpu.rs) and [winit](https://github.com/rust-windowing/winit).
+A cross-platform GPU-accelerated 2D sprite engine in Rust, built on [wgpu](https://wgpu.rs), with optional [winit](https://github.com/rust-windowing/winit) integration.
+
+Use it as a whole application, or embed it as a control inside a host that already owns its event loop and window.
 
 The library lives in `haboard/`; runnable examples for desktop, web, and Android live in `examples/`.
 
@@ -22,6 +24,48 @@ The library lives in `haboard/`; runnable examples for desktop, web, and Android
 The simplest path is `SceneRunner`, which handles window creation, the event loop, and drag-and-drop. See [`examples/demo-app/src/main.rs`](examples/demo-app/src/main.rs) for a complete, runnable example — it loads a persisted scene (or falls back to a default one), wires up save-on-change persistence and drag-and-drop image import, and runs.
 
 For the low-level path — no `SceneRunner`, no `Sprite`, no persistence, a hand-rolled `ApplicationHandler` driving `Engine`/`Scene` directly — see [`examples/demo-app-lite/src/main.rs`](examples/demo-app-lite/src/main.rs).
+
+---
+
+## Embedding in a host application
+
+haboard is layered so the renderer does not drag a windowing model along with it:
+
+| Layer | Knows about winit? | What it is |
+| --- | --- | --- |
+| `Engine`, `Scene`, `Drawables`, `input` | no | The renderer and all interaction logic |
+| `winit_adapter` (`winit` feature) | yes | Maps `WindowEvent` → `Input` |
+| `SceneRunner` (`winit` feature) | yes | Owns the window, the event loop and the lifecycle |
+
+A host that already has an event loop — a browser page, or another UI framework — turns the top two layers off:
+
+```toml
+haboard = { version = "0.2", default-features = false }
+```
+
+`Engine::new` then takes any surface target wgpu accepts, and the host feeds the scene input and drives frames itself:
+
+```rust
+let engine = Engine::from_canvas(canvas.clone(), (width, height)).await?;
+let mut scene = Scene::new(engine, tokens, SceneMode::Edit);
+
+// From your own event handlers:
+let response = scene.handle(Input::Pointer { id, phase, x, y });
+if response.handled { event.prevent_default(); }
+if response.commit.is_now() { save(&scene); }
+
+// From your own frame loop:
+if scene.needs_redraw() { scene.render(); }
+```
+
+See [`examples/canvas-embed/`](examples/canvas-embed) for a complete page that does this with no winit anywhere in its dependency graph, including unmounting and remounting the canvas onto a live scene via `recreate_surface`.
+
+Points worth knowing when embedding:
+
+- **Everything is physical pixels.** haboard applies no scale factor. Size the surface to the element's CSS box times `devicePixelRatio`, and scale pointer coordinates the same way.
+- **`Engine::new` is async**, because requesting a GPU adapter and device are futures on the web. A host always has a brief not-ready state to hold.
+- **Entries are named by `DrawableId`**, not by position, so removing a drawable is safe while a drag or undo history is outstanding.
+- **`Commit::Defer`** marks a change still in progress, such as a held arrow key, so a host with expensive persistence can flush once on the release instead of on every auto-repeat.
 
 ---
 

@@ -10,12 +10,19 @@ keywords = ["gpu", "sprite", "2d"]
 edition = "2024"
 
 [features]
+default = ["winit"]
+# The winit adapter (`WindowEvent` -> `Input`) and the `SceneRunner` application
+# shell. On by default so applications need no opt-in; turn it off
+# (`default-features = false`) to embed `Engine`/`Scene` in a host that owns its
+# own event loop and window, which keeps winit out of the dependency graph
+# entirely.
+winit = ["dep:winit", "dep:pollster"]
 # Bundles the shared demo scene (haboard::demo) used by the example crates.
 demo-scene = []
 
 [dependencies]
 wgpu = "30"
-winit = "0.30"
+winit = { version = "0.30", optional = true }
 image = { version = "0.25", default-features = false, features = [
     "png",
     "jpeg",
@@ -25,9 +32,10 @@ serde = { version = "1", features = ["derive", "rc"] }
 postcard = { version = "1", features = ["alloc"] }
 log = "0.4"
 
-# Native + Android block on async GPU init; the web path uses spawn_local instead.
+# `SceneRunner` blocks on async GPU init here; the web path uses spawn_local
+# instead. Only the runner needs this, hence the tie to the `winit` feature.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-pollster = "1"
+pollster = { version = "1", optional = true }
 
 # Desktop scene persistence locates a per-user app data directory.
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
@@ -41,7 +49,11 @@ wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
     "Window",
     "Element",
+    "DomRect",
     "HtmlCanvasElement",
+    "MouseEvent",
+    "PointerEvent",
+    "KeyboardEvent",
     "Storage",
 ] }
 base64 = "0.22"

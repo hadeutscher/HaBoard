@@ -1,0 +1,44 @@
+[package]
+name = "canvas-embed"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# `default-features = false` drops the winit adapter and `SceneRunner`, leaving
+# the winit-free core. Nothing in this example's dependency graph is a
+# windowing library — check with `cargo tree | grep winit`.
+haboard = { path = "../../haboard", default-features = false }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+log = "0.4"
+console_log = "1"
+console_error_panic_hook = "0.1"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "Window",
+    "Document",
+    "Node",
+    "Element",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "DomRect",
+    "CssStyleDeclaration",
+    "Event",
+    "EventTarget",
+    "PointerEvent",
+    "KeyboardEvent",
+    "ResizeObserver",
+    "ResizeObserverEntry",
+    "ResizeObserverOptions",
+    "ResizeObserverBoxOptions",
+]

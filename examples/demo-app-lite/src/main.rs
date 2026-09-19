@@ -25,6 +25,9 @@ enum AppState {
 
 struct App {
     state: AppState,
+    /// The window is the application's, not the scene's: haboard needs only a
+    /// surface, so the redraw request stays with whoever drives the loop.
+    window: Option<Arc<Window>>,
 }
 
 fn initial_objects() -> Vec<Object> {
@@ -47,8 +50,11 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes())
                 .expect("failed to create window"),
         );
+        let size = window.inner_size();
+        self.window = Some(Arc::clone(&window));
 
-        let engine = pollster::block_on(Engine::new(window));
+        let engine = pollster::block_on(Engine::new(window, (size.width, size.height)))
+            .expect("failed to initialise the GPU");
         let mut scene = Scene::new(engine, initial_objects(), SceneMode::Edit);
         scene.render();
         self.state = AppState::Ready(Box::new(scene));
@@ -71,8 +77,8 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let AppState::Ready(scene) = &self.state {
-            scene.window().request_redraw();
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
     }
 }
@@ -85,6 +91,7 @@ fn main() {
 
     let mut app = App {
         state: AppState::Uninitialized,
+        window: None,
     };
     event_loop.run_app(&mut app).expect("event loop error");
 }

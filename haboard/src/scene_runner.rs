@@ -20,13 +20,13 @@ use std::sync::Arc;
 
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, MouseButton, TouchPhase, WindowEvent},
+    event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::ModifiersState,
     window::{Window, WindowAttributes, WindowId},
 };
 
-use crate::{Drawable, Engine, Scene, SceneMode};
+use crate::{Drawable, Engine, Scene, SceneMode, input::Commit};
 
 /// Callback type for [`SceneRunner::on_event`].
 type EventHandler<T> = dyn FnMut(&WindowEvent, &ModifiersState, Option<&mut Scene<T>>);
@@ -107,6 +107,10 @@ pub struct SceneRunner<T: Drawable> {
     /// Consumed once when the engine becomes ready.
     initial: Option<Vec<T>>,
     state: AppState<T>,
+    /// The window the runner created. Owned here rather than by the scene: the
+    /// engine needs only a surface, and the redraw request belongs to whoever
+    /// drives the loop.
+    window: Option<Arc<Window>>,
     /// Proxy used to deliver the async-initialised engine back to the loop.
     proxy: Option<EventLoopProxy<UserEvent>>,
     /// Last known cursor position, used to centre drag-dropped images.
@@ -132,6 +136,7 @@ impl<T: Drawable + 'static> SceneRunner<T> {
             scene_mode: mode,
             initial: Some(initial),
             state: AppState::Uninitialized,
+            window: None,
             proxy: None,
             cursor_pos: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
@@ -257,13 +262,17 @@ impl<T: Drawable + 'static> SceneRunner<T> {
     fn set_ready(&mut self, engine: Engine) {
         let items = self.initial.take().unwrap_or_default();
         let mut scene = Scene::new(engine, items, self.scene_mode);
-        // On the web, `Engine::new` reads the window's size before the canvas
-        // has any CSS layout (GPU init is async, so by the time we get here
-        // winit's `ResizeObserver` has already updated its tracked size, even
-        // though the `Resized` event itself was dropped — there was no scene
-        // yet to receive it while `AppState` was `Loading`). Catch up once.
+        // On the web, the size passed to `Engine::new` was read before the
+        // canvas had any CSS layout (GPU init is async, so by the time we get
+        // here winit's `ResizeObserver` has already updated its tracked size,
+        // even though the `Resized` event itself was dropped — there was no
+        // scene yet to receive it while `AppState` was `Loading`). Catch up
+        // once.
         #[cfg(target_arch = "wasm32")]
-        scene.resize(scene.window().inner_size());
+        if let Some(window) = &self.window {
+            let size = window.inner_size();
+            scene.resize((size.width, size.height));
+        }
         scene.render();
         self.state = AppState::Ready(Box::new(scene));
     }
@@ -278,28 +287,6 @@ impl<T: Drawable + 'static> SceneRunner<T> {
         {
             cb(scene);
             self.on_change = Some(cb);
-        }
-    }
-
-    /// Whether handling `event` may have committed a change worth persisting:
-    /// the end of a drag (mouse/touch release) or an edit keypress.
-    fn commits_scene_change(event: &WindowEvent) -> bool {
-        match event {
-            WindowEvent::MouseInput {
-                state: ElementState::Released,
-                button: MouseButton::Left,
-                ..
-            }
-            | WindowEvent::KeyboardInput {
-                event:
-                    winit::event::KeyEvent {
-                        state: ElementState::Pressed,
-                        ..
-                    },
-                ..
-            } => true,
-            WindowEvent::Touch(t) => matches!(t.phase, TouchPhase::Ended | TouchPhase::Cancelled),
-            _ => false,
         }
     }
 
@@ -373,36 +360,47 @@ impl<T: Drawable + 'static> SceneRunner<T> {
 
 impl<T: Drawable + 'static> ApplicationHandler<UserEvent> for SceneRunner<T> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // Re-resume after an Android suspend: recreate the surface on a fresh
-        // window rather than rebuilding the whole engine.
-        if let AppState::Ready(scene) = &mut self.state {
-            let window = Arc::new(
-                event_loop
-                    .create_window(Self::window_attributes())
-                    .expect("Failed to create window"),
-            );
-            scene.recreate_surface(window);
-            return;
-        }
-
         let window = Arc::new(
             event_loop
                 .create_window(Self::window_attributes())
                 .expect("Failed to create window"),
         );
+        let size = window.inner_size();
+        self.window = Some(Arc::clone(&window));
+
+        // Re-resume after an Android suspend: recreate the surface on the fresh
+        // window rather than rebuilding the whole engine.
+        if let AppState::Ready(scene) = &mut self.state {
+            if let Err(e) = scene.recreate_surface(window, (size.width, size.height)) {
+                log::error!("could not recreate the surface on resume: {e}");
+            }
+            return;
+        }
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let engine = pollster::block_on(Engine::new(window));
-            self.set_ready(engine);
+            match pollster::block_on(Engine::new(window, (size.width, size.height))) {
+                Ok(engine) => self.set_ready(engine),
+                // Nothing can be drawn without a GPU, so there is no useful
+                // degraded mode for an application; an embedder handles the
+                // same failure itself by calling `Engine::new` directly.
+                Err(e) => {
+                    log::error!("GPU initialisation failed: {e}");
+                    event_loop.exit();
+                }
+            }
         }
         #[cfg(target_arch = "wasm32")]
         {
             self.state = AppState::Loading;
             let proxy = self.proxy.clone().expect("proxy must be set before run");
             wasm_bindgen_futures::spawn_local(async move {
-                let engine = Engine::new(window).await;
-                let _ = proxy.send_event(UserEvent::EngineReady(engine));
+                match Engine::new(window, (size.width, size.height)).await {
+                    Ok(engine) => {
+                        let _ = proxy.send_event(UserEvent::EngineReady(engine));
+                    }
+                    Err(e) => log::error!("GPU initialisation failed: {e}"),
+                }
             });
         }
     }
@@ -420,8 +418,8 @@ impl<T: Drawable + 'static> ApplicationHandler<UserEvent> for SceneRunner<T> {
     }
 
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        if let AppState::Ready(scene) = &self.state {
-            scene.window().request_redraw();
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
     }
 
@@ -440,6 +438,18 @@ impl<T: Drawable + 'static> ApplicationHandler<UserEvent> for SceneRunner<T> {
                     scene.render();
                 }
             }
+            // A window losing focus can interrupt a run of auto-repeats before
+            // the key release that would have flushed it, so settle any
+            // deferred change here rather than losing it.
+            WindowEvent::Focused(false) => {
+                let owed = match &mut self.state {
+                    AppState::Ready(scene) => scene.take_pending_commit(),
+                    _ => false,
+                };
+                if owed {
+                    self.invoke_on_change();
+                }
+            }
             _ => {
                 if let WindowEvent::CursorMoved { position, .. } = &event {
                     self.cursor_pos = (position.x as f32, position.y as f32);
@@ -447,9 +457,9 @@ impl<T: Drawable + 'static> ApplicationHandler<UserEvent> for SceneRunner<T> {
                 if let WindowEvent::ModifiersChanged(mods) = &event {
                     self.modifiers = mods.state();
                 }
-                let mut handled = false;
+                let mut commit = Commit::No;
                 if let AppState::Ready(scene) = &mut self.state {
-                    handled = scene.handle_window_event(&event);
+                    commit = scene.handle_winit_event(&event).commit;
                 }
                 // Offer unhandled events to the caller's hook.
                 // Use take()/replace() to avoid holding a borrow on self while
@@ -462,8 +472,11 @@ impl<T: Drawable + 'static> ApplicationHandler<UserEvent> for SceneRunner<T> {
                     handler(&event, &self.modifiers, scene);
                     self.event_handler = Some(handler);
                 }
-                // Invoke on_change once the interaction that just landed is a commit point.
-                if handled && Self::commits_scene_change(&event) {
+                // Persist once the interaction that just landed has finished.
+                // `Commit::Defer` is deliberately not a commit point: it marks
+                // a change still in progress, such as a held arrow key, and is
+                // flushed by the release that ends the run.
+                if commit.is_now() {
                     self.invoke_on_change();
                 }
             }

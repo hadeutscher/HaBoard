@@ -1,7 +1,4 @@
-use std::sync::Arc;
-
 use wgpu::util::DeviceExt;
-use winit::window::Window;
 
 use crate::{drawables::TextureUploader, texture::Texture};
 
@@ -105,19 +102,71 @@ pub(crate) struct Quad<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Why [`Engine::new`] or [`Engine::recreate_surface`] failed.
+///
+/// The three cases are kept apart because they call for different messages: no
+/// adapter at all means the platform offers no usable GPU backend and the user
+/// should be told so, whereas a refused device request means an adapter existed
+/// but would not grant the limits haboard asked for — which is a haboard bug
+/// worth reporting rather than anything the user can act on.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum EngineError {
+    /// The surface could not be created for the given target.
+    CreateSurface(wgpu::CreateSurfaceError),
+    /// No GPU adapter was available for the surface.
+    NoAdapter(wgpu::RequestAdapterError),
+    /// An adapter was found but refused to produce a device.
+    RequestDevice(wgpu::RequestDeviceError),
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CreateSurface(_) => f.write_str("could not create a GPU surface for the target"),
+            Self::NoAdapter(_) => f.write_str("no GPU adapter is available"),
+            Self::RequestDevice(_) => f.write_str("the GPU adapter refused to provide a device"),
+        }
+    }
+}
+
+impl std::error::Error for EngineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::CreateSurface(e) => Some(e),
+            Self::NoAdapter(e) => Some(e),
+            Self::RequestDevice(e) => Some(e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
 
 /// The low-level GPU rendering engine.
 ///
-/// `Engine` manages all wgpu resources for a window. It is a pure renderer:
+/// `Engine` manages all wgpu resources for one surface. It is a pure renderer:
 /// given a list of [`Quad`]s it rasterises them each frame and holds no scene
 /// state. Use [`Scene`](crate::Scene) to pair the engine with a managed
 /// drawable collection.
+///
+/// It knows nothing about windowing. The surface target is whatever wgpu
+/// accepts — an `Arc<winit::window::Window>` on desktop, an
+/// [`HtmlCanvasElement`](web_sys::HtmlCanvasElement) on the web via
+/// [`from_canvas`](Engine::from_canvas) — so a host that already owns its event
+/// loop can drive the engine directly.
+///
+/// # Coordinates
+/// All sizes and positions are **physical pixels**. The engine applies no scale
+/// factor of its own; a host working in logical units converts before calling
+/// in.
 pub struct Engine {
-    window: Arc<Window>,
-    /// Kept so the surface can be recreated after an Android suspend/resume
-    /// cycle.
+    /// Kept so the surface can be recreated after the platform takes it away
+    /// (an Android suspend/resume cycle, or a host remounting its canvas).
     instance: wgpu::Instance,
     /// `None` while the platform has taken the surface away (Android suspend).
     surface: Option<wgpu::Surface<'static>>,
@@ -143,15 +192,41 @@ fn screen_uniform_data(width: f32, height: f32) -> [f32; 4] {
 }
 
 impl Engine {
-    /// Initialise wgpu and build all fixed GPU resources.
-    pub async fn new(window: Arc<Window>) -> Self {
-        let size = window.inner_size();
+    /// Initialise wgpu for `target` and build all fixed GPU resources.
+    ///
+    /// `size` is the surface size in **physical pixels**; it is not read back
+    /// from the target, because the only thing a target can report is the value
+    /// the host already set. On the web in particular, a `<canvas>` that has
+    /// never had its backing store sized reports the HTML default of 300×150,
+    /// so inferring a size would quietly produce a mis-sized surface instead of
+    /// an error.
+    ///
+    /// This is `async` because requesting an adapter and a device are futures
+    /// on the web. That is inherent to WebGPU rather than to haboard, and it
+    /// means an embedder always has a brief "not ready yet" state to hold —
+    /// typically an `Option<Scene>` filled in by an async block.
+    ///
+    /// Any target wgpu accepts works. On desktop that is an
+    /// `Arc<winit::window::Window>`; on the web use
+    /// [`from_canvas`](Engine::from_canvas).
+    ///
+    /// ```text
+    /// let size = window.inner_size();
+    /// let engine = Engine::new(window, (size.width, size.height)).await?;
+    /// ```
+    pub async fn new(
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        size: (u32, u32),
+    ) -> Result<Self, EngineError> {
+        let (width, height) = (size.0.max(1), size.1.max(1));
 
         let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
         instance_desc.backends = wgpu::Backends::all();
         let instance = wgpu::Instance::new(instance_desc);
 
-        let surface = instance.create_surface(Arc::clone(&window)).unwrap();
+        let surface = instance
+            .create_surface(target)
+            .map_err(EngineError::CreateSurface)?;
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -161,7 +236,7 @@ impl Engine {
                 apply_limit_buckets: false,
             })
             .await
-            .unwrap();
+            .map_err(EngineError::NoAdapter)?;
 
         // WebGL2 has no compute stage at all, so `Limits::default()` — which
         // demands a non-zero `max_compute_workgroups_per_dimension` — is
@@ -188,7 +263,7 @@ impl Engine {
                 ..Default::default()
             })
             .await
-            .unwrap();
+            .map_err(EngineError::RequestDevice)?;
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
@@ -202,8 +277,8 @@ impl Engine {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             color_space: wgpu::SurfaceColorSpace::Auto,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width,
+            height,
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -220,10 +295,7 @@ impl Engine {
         // ── Screen uniform ───────────────────────────────────────────────────
         let screen_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Screen uniform"),
-            contents: bytemuck::cast_slice(&screen_uniform_data(
-                size.width as f32,
-                size.height as f32,
-            )),
+            contents: bytemuck::cast_slice(&screen_uniform_data(width as f32, height as f32)),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -343,8 +415,7 @@ impl Engine {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        Self {
-            window,
+        Ok(Self {
             instance,
             surface: Some(surface),
             device,
@@ -362,12 +433,26 @@ impl Engine {
                 b: 0.1,
                 a: 1.0,
             },
-        }
+        })
     }
 
-    /// Return a reference to the window.
-    pub fn window(&self) -> &Arc<Window> {
-        &self.window
+    /// Initialise wgpu against an HTML canvas.
+    ///
+    /// Equivalent to passing [`wgpu::SurfaceTarget::Canvas`] to
+    /// [`new`](Engine::new), but without requiring the caller to depend on wgpu
+    /// just to name that type — there is no implicit conversion from
+    /// `HtmlCanvasElement`, because wgpu's blanket conversion covers only
+    /// window-handle types.
+    ///
+    /// `size` is the canvas's **backing store** size in physical pixels (its
+    /// `width`/`height` attributes), which for a crisp result on a
+    /// high-DPI display is its CSS size multiplied by `devicePixelRatio`.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn from_canvas(
+        canvas: web_sys::HtmlCanvasElement,
+        size: (u32, u32),
+    ) -> Result<Self, EngineError> {
+        Self::new(wgpu::SurfaceTarget::Canvas(canvas), size).await
     }
 
     /// Current surface size in physical pixels (`width`, `height`).
@@ -375,20 +460,22 @@ impl Engine {
         (self.config.width, self.config.height)
     }
 
-    /// Handle a window resize.
-    pub fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
-        if size.width == 0 || size.height == 0 {
+    /// Resize the surface. `size` is in physical pixels; a zero extent is
+    /// ignored, since a surface cannot be configured with one.
+    pub fn resize(&mut self, size: (u32, u32)) {
+        let (width, height) = size;
+        if width == 0 || height == 0 {
             return;
         }
-        self.config.width = size.width;
-        self.config.height = size.height;
+        self.config.width = width;
+        self.config.height = height;
         if let Some(surface) = &self.surface {
             surface.configure(&self.device, &self.config);
         }
         self.queue.write_buffer(
             &self.screen_uniform,
             0,
-            bytemuck::cast_slice(&screen_uniform_data(size.width as f32, size.height as f32)),
+            bytemuck::cast_slice(&screen_uniform_data(width as f32, height as f32)),
         );
     }
 
@@ -402,16 +489,29 @@ impl Engine {
         self.surface = None;
     }
 
-    /// Recreate the surface for a (possibly new) window after a suspend/resume
-    /// cycle, reconfiguring it to the window's current size.
-    pub fn recreate_surface(&mut self, window: Arc<Window>) {
-        let size = window.inner_size();
+    /// Recreate the surface against a (possibly different) target,
+    /// reconfiguring it to `size` in physical pixels.
+    ///
+    /// The device, queue, pipeline and every uploaded texture survive, so this
+    /// is far cheaper than rebuilding the engine — and it is what lets a host
+    /// unmount and remount the element it renders into. On Android it pairs
+    /// with [`drop_surface`](Engine::drop_surface) across a suspend/resume
+    /// cycle.
+    ///
+    /// The engine is left without a surface if this fails, so rendering stays a
+    /// no-op rather than drawing to a stale target; call again to retry.
+    pub fn recreate_surface(
+        &mut self,
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        size: (u32, u32),
+    ) -> Result<(), EngineError> {
+        self.surface = None;
         let surface = self
             .instance
-            .create_surface(Arc::clone(&window))
-            .expect("failed to recreate surface");
-        self.config.width = size.width.max(1);
-        self.config.height = size.height.max(1);
+            .create_surface(target)
+            .map_err(EngineError::CreateSurface)?;
+        self.config.width = size.0.max(1);
+        self.config.height = size.1.max(1);
         surface.configure(&self.device, &self.config);
         self.queue.write_buffer(
             &self.screen_uniform,
@@ -421,8 +521,28 @@ impl Engine {
                 self.config.height as f32,
             )),
         );
-        self.window = window;
         self.surface = Some(surface);
+        Ok(())
+    }
+
+    /// Recreate the surface against an HTML canvas.
+    ///
+    /// The canvas counterpart to [`recreate_surface`](Engine::recreate_surface),
+    /// for the same reason [`from_canvas`](Engine::from_canvas) exists: wgpu has
+    /// no implicit conversion from `HtmlCanvasElement`, so without this a caller
+    /// would need its own wgpu dependency to name
+    /// [`wgpu::SurfaceTarget::Canvas`].
+    ///
+    /// This is what lets an embedded board survive its element being unmounted
+    /// and remounted — the device, the pipeline and every uploaded texture are
+    /// kept, so only the surface is rebuilt.
+    #[cfg(target_arch = "wasm32")]
+    pub fn recreate_surface_from_canvas(
+        &mut self,
+        canvas: web_sys::HtmlCanvasElement,
+        size: (u32, u32),
+    ) -> Result<(), EngineError> {
+        self.recreate_surface(wgpu::SurfaceTarget::Canvas(canvas), size)
     }
 
     /// Build a [`TextureUploader`] that shares this engine's device, queue, and
