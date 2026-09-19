@@ -56,4 +56,4 @@ web-sys = { version = "0.3", features = [
     "KeyboardEvent",
     "Storage",
 ] }
-base64 = "0.22"
+base64 = "0.23"
