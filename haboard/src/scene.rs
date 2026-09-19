@@ -466,6 +466,39 @@ impl<T: Drawable> Scene<T> {
         self.dirty = true;
     }
 
+    /// Whether a drag is in flight, by mouse or by any touch point.
+    ///
+    /// A drag captures each member's position when it starts and recomputes
+    /// `start + delta` on every pointer move, so a host that repositions a
+    /// dragged drawable — a layout refit, a `set_items`, any `get_mut` that
+    /// moves something — will have that change overwritten by the next move.
+    /// Ask this before repositioning, and either defer the change until the
+    /// gesture ends or call [`cancel_drag`](Self::cancel_drag) first.
+    pub fn is_dragging(&self) -> bool {
+        !self.touch_drags.is_empty() || matches!(self.input_mode, InputMode::Dragging { .. })
+    }
+
+    /// End any in-flight drag, keeping the drawables where they currently are.
+    ///
+    /// Committing rather than reverting, for the same reason
+    /// [`PointerPhase::Cancel`] does: the drawables have already moved on
+    /// screen. Returns whether that produced anything to persist, so a host
+    /// can treat it exactly like a [`Response::commit`].
+    pub fn cancel_drag(&mut self) -> Commit {
+        let mut committed = self.on_release();
+        for (_, drag) in std::mem::take(&mut self.touch_drags) {
+            committed |= self.record_move(drag.start_positions);
+        }
+        self.rubber_band_touch = None;
+        if committed {
+            self.pending_commit = false;
+            self.dirty = true;
+            Commit::Now
+        } else {
+            Commit::No
+        }
+    }
+
     /// Whether a [`Commit::Defer`] is still outstanding, clearing the flag.
     ///
     /// A deferred run is normally flushed by the key release that ends it. Ask
