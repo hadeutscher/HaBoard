@@ -135,4 +135,5 @@ cd examples/android-demo && cargo apk run
 ## Prerequisites
 
 - Rust stable ≥ 1.85 (edition 2024)
+- Cargo 1.100 or newer to enforce the repository's three-day cooldown for newly published registry dependencies.
 - A GPU with Vulkan, Metal, DX12, or WebGPU support
